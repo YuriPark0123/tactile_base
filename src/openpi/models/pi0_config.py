@@ -34,6 +34,14 @@ class Pi0Config(_model.BaseModelConfig):
 
     pytorch_compile_mode: str | None = "max-autotune"
 
+    # Tactile token-level concatenation (OpenVTLA-style). If tactile_tokens > 0, the observation carries
+    # `tactile` features of shape [tactile_tokens, tactile_feature_dim] that are projected to the VLM width and
+    # prepended to the visual token sequence.
+    tactile_tokens: int = 0
+    tactile_feature_dim: int = 768
+    # "linear" or "mlp" (Linear-GELU-Linear, LLaVA-style).
+    tactile_projector: str = "mlp"
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
@@ -80,6 +88,12 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tactile=(
+                    jax.ShapeDtypeStruct([batch_size, self.tactile_tokens, self.tactile_feature_dim], jnp.float32)
+                    if self.tactile_tokens > 0
+                    else None
+                ),
+                tactile_mask=jax.ShapeDtypeStruct([batch_size], jnp.bool_) if self.tactile_tokens > 0 else None,
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 

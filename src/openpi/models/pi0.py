@@ -99,6 +99,20 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        self.tactile_tokens = config.tactile_tokens
+        self.tactile_dtype = config.dtype
+        if config.tactile_tokens > 0:
+            width = paligemma_config.width
+            self.tactile_norm = nnx.LayerNorm(config.tactile_feature_dim, rngs=rngs)
+            if config.tactile_projector == "linear":
+                self.tactile_proj_in = nnx.Linear(config.tactile_feature_dim, width, rngs=rngs)
+                self.tactile_proj_out = None
+            elif config.tactile_projector == "mlp":
+                self.tactile_proj_in = nnx.Linear(config.tactile_feature_dim, width, rngs=rngs)
+                self.tactile_proj_out = nnx.Linear(width, width, rngs=rngs)
+            else:
+                raise ValueError(f"Unknown tactile_projector: {config.tactile_projector}")
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
@@ -109,6 +123,21 @@ class Pi0(_model.BaseModel):
         input_mask = []
         ar_mask = []
         tokens = []
+        # embed tactile tokens first: they are prepended to the visual token sequence (OpenVTLA ① token concat).
+        if self.tactile_tokens > 0:
+            if obs.tactile is None:
+                raise ValueError("Model has a tactile projector but observation.tactile is None")
+            t = self.tactile_norm(obs.tactile.astype(jnp.float32))
+            t = self.tactile_proj_in(t)
+            if self.tactile_proj_out is not None:
+                t = self.tactile_proj_out(nnx.gelu(t, approximate=True))
+            tactile_tokens = t.astype(self.tactile_dtype)
+            tokens.append(tactile_tokens)
+            tmask = obs.tactile_mask
+            if tmask is None:
+                tmask = jnp.ones(obs.tactile.shape[0], dtype=jnp.bool_)
+            input_mask.append(einops.repeat(tmask, "b -> b s", s=tactile_tokens.shape[1]))
+            ar_mask += [False] * tactile_tokens.shape[1]
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)

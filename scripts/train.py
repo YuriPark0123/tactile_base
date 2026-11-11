@@ -155,7 +155,32 @@ def train_step(
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    accum = config.grad_accum_steps
+    if accum <= 1:
+        loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    else:
+        # Gradient accumulation: split the global batch into `accum` micro-batches and scan over them so that only
+        # one micro-batch of activations is alive at a time. One optimizer update per global batch.
+        def _split(x):
+            return x.reshape(accum, x.shape[0] // accum, *x.shape[1:])
+
+        micro_obs = jax.tree.map(_split, observation)
+        micro_act = _split(actions)
+        grads_shape = state.params.filter(config.trainable_filter)
+        zero_grads = jax.tree.map(lambda p: jnp.zeros(p.shape, jnp.float32), grads_shape)
+
+        def _body(carry, xs):
+            g_acc, l_acc = carry
+            i, o, a = xs
+            l, g = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, jax.random.fold_in(train_rng, i), o, a)
+            g_acc = jax.tree.map(lambda acc, gi: acc + gi.astype(jnp.float32), g_acc, g)
+            return (g_acc, l_acc + l), None
+
+        (grads, loss), _ = jax.lax.scan(
+            _body, (zero_grads, jnp.zeros((), jnp.float32)), (jnp.arange(accum), micro_obs, micro_act)
+        )
+        grads = jax.tree.map(lambda g: g / accum, grads)
+        loss = loss / accum
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -195,6 +220,11 @@ def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
+    if config.batch_size % (jax.device_count() * config.grad_accum_steps) != 0:
+        raise ValueError(
+            f"Batch size {config.batch_size} must be divisible by devices*grad_accum_steps "
+            f"({jax.device_count()}*{config.grad_accum_steps})."
+        )
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."

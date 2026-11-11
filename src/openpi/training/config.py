@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.openvitac_policy as openvitac_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -356,6 +357,61 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotOpenViTacDataConfig(DataConfigFactory):
+    """OpenViTac sim/real data converted by examples/openvitac/convert_openvitac.py.
+
+    tactile_mode=None trains vision-only pi0.5; otherwise frozen AnyTouch2 tokens (cached) are fed to the model.
+    """
+
+    tactile_mode: str | None = None
+    anytouch2_checkpoint: str = "checkpoint-4frames.pth"
+    repeat_current_frame: bool = False
+    # Train on joint deltas relative to the current state (gripper stays absolute); the server converts back, so the
+    # client always receives absolute joint targets.
+    delta_joint_actions: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack = {
+            "observation/image": "image",
+            "observation/wrist_image": "wrist_image",
+            "observation/state": "state",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        cache = None
+        if self.tactile_mode is not None:
+            repack["observation/tactile_index"] = "index"
+            cache = openvitac_policy.default_tactile_cache(self.repo_id, self.anytouch2_checkpoint)
+        repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack)])
+        data_transforms = _transforms.Group(
+            inputs=[
+                openvitac_policy.OpenViTacInputs(
+                    model_type=model_config.model_type,
+                    tactile_mode=self.tactile_mode,
+                    tactile_cache=cache,
+                    anytouch2_checkpoint=self.anytouch2_checkpoint,
+                    repeat_current_frame=self.repeat_current_frame,
+                )
+            ],
+            outputs=[openvitac_policy.OpenViTacOutputs()],
+        )
+        if self.delta_joint_actions:
+            mask = _transforms.make_bool_mask(7, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(mask)],
+                outputs=[_transforms.AbsoluteActions(mask)],
+            )
+        model_transforms = ModelTransformFactory()(model_config)
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -504,6 +560,9 @@ class TrainConfig:
     seed: int = 42
     # Global batch size.
     batch_size: int = 32
+    # Number of micro-batches the global batch is split into (gradient accumulation). The effective batch for each
+    # optimizer update is still `batch_size`; per-step activation memory scales with batch_size / grad_accum_steps.
+    grad_accum_steps: int = 1
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
     num_workers: int = 2
@@ -972,6 +1031,68 @@ _CONFIGS = [
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
+
+# ---------------------------------------------------------------------------------------------------------------------
+# OpenViTac: pi0.5 (vision only) and pi0.5 + AnyTouch2 (OpenVTLA-style token concat) baselines.
+# Paper recipe: single-task, 100 sim demos, 20k steps, global batch 64, final checkpoint. Here: LoRA (24 GB GPU) with
+# gradient accumulation to reach batch 64.
+# ---------------------------------------------------------------------------------------------------------------------
+OPENVITAC_TASKS = ("hardness_classify", "gear_assembly", "insert_USB")
+
+
+def _openvitac_config(
+    name: str,
+    task: str,
+    *,
+    tactile_mode: str | None,
+    action_horizon: int = 50,
+    repeat_current_frame: bool = False,
+    tactile_projector: str = "mlp",
+) -> TrainConfig:
+    from openpi.tactile import anytouch2 as _at2
+
+    tokens = 0 if tactile_mode is None else 2 * _at2.TOKEN_MODES[tactile_mode]
+    model = pi0_config.Pi0Config(
+        pi05=True,
+        action_dim=32,
+        action_horizon=action_horizon,
+        discrete_state_input=False,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+        tactile_tokens=tokens,
+        tactile_projector=tactile_projector,
+    )
+    return TrainConfig(
+        name=name,
+        project_name="tactile_base",
+        model=model,
+        data=LeRobotOpenViTacDataConfig(
+            repo_id=f"openvitac/{task}_gelsight",
+            base_config=DataConfig(prompt_from_task=True),
+            tactile_mode=tactile_mode,
+            repeat_current_frame=repeat_current_frame,
+        ),
+        batch_size=64,
+        grad_accum_steps=4,
+        num_train_steps=20_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=5e-5, decay_steps=20_000, decay_lr=5e-6),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        freeze_filter=model.get_freeze_filter(),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        save_interval=2_000,
+        keep_period=10_000,
+        log_interval=50,
+        num_workers=8,
+    )
+
+
+for _task in OPENVITAC_TASKS:
+    _CONFIGS.append(_openvitac_config(f"pi05_vision_{_task}", _task, tactile_mode=None))
+    _CONFIGS.append(_openvitac_config(f"openvtla_{_task}", _task, tactile_mode="cls_pool2"))
+_CONFIGS.append(_openvitac_config("openvtla_debug", "debug", tactile_mode="cls_pool2"))
+
+
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 
 
