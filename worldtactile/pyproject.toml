@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worldtactile"
+version = "0.1.0"
+description = "Tactile world queries for a pi0.5 vision-language-action policy (UniVTAC)"
+requires-python = ">=3.11"
+# openpi (with its transformers patch) and AnyTouch2 are installed from their repositories; see README.md
+dependencies = [
+    "torch>=2.7",
+    "transformers==4.53.2",
+    "peft>=0.21",
+    "safetensors",
+    "sentencepiece",
+    "h5py",
+    "numpy<2",
+    "opencv-python-headless",
+    "pillow",
+    "scipy",
+]
+
+[tool.setuptools.packages.find]
+include = ["worldtactile*"]
+
+[tool.ruff]
+line-length = 120
