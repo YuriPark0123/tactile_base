@@ -1037,7 +1037,7 @@ if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
 # Paper recipe: single-task, 100 sim demos, 20k steps, global batch 64, final checkpoint. Here: LoRA (24 GB GPU) with
 # gradient accumulation to reach batch 64.
 # ---------------------------------------------------------------------------------------------------------------------
-OPENVITAC_TASKS = ("hardness_classify", "gear_assembly", "insert_USB")
+OPENVITAC_TASKS = ("insert_USB", "grasp_chip", "gear_assembly", "empty_can_selection", "hardness_classify")
 
 
 def _openvitac_config(

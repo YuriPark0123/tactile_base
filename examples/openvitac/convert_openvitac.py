@@ -54,6 +54,9 @@ class Args:
     stride: int = 2
     encode_batch: int = 64
     skip_features: bool = False
+    # AnyTouch2 device / dtype (cpu + float32 while the GPU is busy with training)
+    device: str = "cuda"
+    dtype: str = "float16"
 
 
 def resize(img: np.ndarray) -> np.ndarray:
@@ -107,7 +110,8 @@ def main(args: Args) -> None:
     if not args.skip_features:
         encoder = at2.AnyTouch2Encoder(
             at2.AnyTouch2Config(
-                checkpoint=args.anytouch2_checkpoint, num_frames=args.num_frames, stride=args.stride, sensor=args.sensor
+                checkpoint=args.anytouch2_checkpoint, num_frames=args.num_frames, stride=args.stride, sensor=args.sensor,
+                device=args.device, dtype=args.dtype,
             )
         )
         feat_dir = out / "tactile"

@@ -31,13 +31,24 @@ below that the paper does not specify are ours.
 
 ## Usage
 
+Tasks (simulation, GelSight Mini, 100 demos each): `insert_USB`, `grasp_chip`, `gear_assembly`,
+`empty_can_selection` (configs `openvtla_<task>` and the vision-only `pi05_vision_<task>`; `hardness_classify` also
+exists). AnyTouch2 weights need access to the gated HF repo `xxuan01/AnyTouch2-Model` (`huggingface-cli login`).
+
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 uv sync && git submodule update --init third_party/AnyTouch2
 export HF_LEROBOT_HOME=/path/to/lerobot OPENPI_DATA_HOME=/path/to/openpi_cache
-uv run examples/openvitac/convert_openvitac.py --src <OpenViTac>/Simulation/GelSight_mini/hardness_classify \
-    --repo-id openvitac/hardness_classify_gelsight
-uv run scripts/compute_norm_stats.py --config-name openvtla_hardness_classify
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py openvtla_hardness_classify --exp-name=baseline
+TASK=insert_USB
+# 1. raw data (FVL-Lab/OpenViTac, revision used here: 5fb2757)
+uv run huggingface-cli download FVL-Lab/OpenViTac --repo-type dataset --revision 5fb2757b88826917242adefd9196424ef8cf2d98 \
+    --include "Simulation/GelSight_mini/$TASK/*" --local-dir /path/to/openvitac
+# 2. openpi dataset + cached AnyTouch2 features (add --device cpu --dtype float32 if the GPU is busy)
+uv run examples/openvitac/convert_openvitac.py --src /path/to/openvitac/Simulation/GelSight_mini/$TASK \
+    --repo-id openvitac/${TASK}_gelsight
+# 3. normalization stats, then train (paper protocol: 20k steps, batch 64, final checkpoint)
+uv run scripts/compute_norm_stats.py --config-name openvtla_$TASK
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py openvtla_$TASK --exp-name=baseline --keep-period None
 ```
 
-Measured on one RTX 3090 (24 GB): ~20 s per optimizer step at batch 64.
+`--keep-period None` keeps only the latest checkpoint (~12 GB each); add `--no-wandb-enabled` without a wandb login.
+Measured on one RTX 3090 (24 GB): ~20 s per optimizer step at batch 64 (~4.6 days per task).
