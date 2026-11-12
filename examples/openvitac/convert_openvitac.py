@@ -172,6 +172,8 @@ def main(args: Args) -> None:
             "num_frames": args.num_frames,
             "stride": args.stride,
             "background": "first tactile frame of episode",
+            "device": args.device,
+            "dtype": args.dtype,
             "layout": "[N, 2(left,right), 38(cls,5 sensor,2x4x4 pooled patches), 768] post_layernorm",
             "frames": int(total),
         }
