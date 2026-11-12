@@ -53,8 +53,9 @@ class OpenViTacInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
     # None -> vision-only pi0.5. Otherwise an openpi.tactile.anytouch2.TOKEN_MODES key.
     tactile_mode: str | None = None
-    # Path of the cached AnyTouch2 feature memmap (training only).
-    tactile_cache: str | None = None
+    # Path of the cached AnyTouch2 feature memmap (training only); for a multi-task mixture one path per dataset,
+    # selected by `observation/tactile_dataset`.
+    tactile_cache: str | tuple[str, ...] | None = None
     # AnyTouch2 checkpoint used for online encoding (inference only); must match the cache.
     anytouch2_checkpoint: str = "checkpoint-4frames.pth"
     # Replace the tactile history with copies of the current frame (temporal ablation, paper Tab. S6).
@@ -68,10 +69,13 @@ class OpenViTacInputs(transforms.DataTransformFn):
         if "observation/tactile_index" in data:
             if self.tactile_cache is None:
                 raise ValueError("tactile_cache is required when training from cached features")
-            mm = self._memmaps.get(self.tactile_cache)
+            path = self.tactile_cache
+            if not isinstance(path, str):
+                path = path[int(np.asarray(data.get("observation/tactile_dataset", 0)))]
+            mm = self._memmaps.get(path)
             if mm is None:
-                mm = np.load(self.tactile_cache, mmap_mode="r")
-                self._memmaps[self.tactile_cache] = mm
+                mm = np.load(path, mmap_mode="r")
+                self._memmaps[path] = mm
             return np.asarray(mm[int(np.asarray(data["observation/tactile_index"]))])
 
         enc = self._encoders.get(self.anytouch2_checkpoint)

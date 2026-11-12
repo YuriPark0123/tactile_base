@@ -50,5 +50,17 @@ uv run scripts/compute_norm_stats.py --config-name openvtla_$TASK
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py openvtla_$TASK --exp-name=baseline --keep-period None
 ```
 
+**Multi-task** (`openvtla_multitask`, `pi05_vision_multitask`): one policy on the four tasks above, every task drawn
+equally often (`balance_datasets`); the four datasets are concatenated at load time (`DataConfig.repo_ids`, each sample
+tagged with `dataset_index` to pick its AnyTouch2 cache), with normalization stats over the union. Convert the four
+tasks first, then:
+
+```bash
+uv run scripts/compute_norm_stats.py --config-name openvtla_multitask
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py openvtla_multitask --exp-name=baseline --keep-period None
+```
+
+The paper trains single-task; the default budget (20k x 64) equals one single-task run, i.e. 1/4 of the samples per task.
+
 `--keep-period None` keeps only the latest checkpoint (~12 GB each); add `--no-wandb-enabled` without a wandb login.
 Measured on one RTX 3090 (24 GB): ~20 s per optimizer step at batch 64 (~4.6 days per task).

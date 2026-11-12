@@ -91,6 +91,12 @@ class DataConfig:
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
+    # Multi-task training: several LeRobot datasets concatenated into one. `repo_id` then only names the assets
+    # directory (normalization stats, computed over the union). Each sample carries `dataset_index` (position here).
+    repo_ids: Sequence[str] = ()
+    # With `repo_ids`: draw every dataset equally often instead of in proportion to its number of frames.
+    balance_datasets: bool = False
+
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
@@ -366,6 +372,10 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
     tactile_mode: str | None = None
     anytouch2_checkpoint: str = "checkpoint-4frames.pth"
     repeat_current_frame: bool = False
+    # Multi-task: the datasets trained together (`repo_id` then names the assets directory only), and whether every
+    # task is drawn equally often.
+    repo_ids: tuple[str, ...] = ()
+    balance_datasets: bool = True
     # Train on joint deltas relative to the current state (gripper stays absolute); the server converts back, so the
     # client always receives absolute joint targets.
     delta_joint_actions: bool = True
@@ -382,7 +392,13 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
         cache = None
         if self.tactile_mode is not None:
             repack["observation/tactile_index"] = "index"
-            cache = openvitac_policy.default_tactile_cache(self.repo_id, self.anytouch2_checkpoint)
+            if self.repo_ids:  # one AnyTouch2 cache per dataset, chosen by the sample's dataset_index
+                repack["observation/tactile_dataset"] = "dataset_index"
+                cache = tuple(
+                    openvitac_policy.default_tactile_cache(r, self.anytouch2_checkpoint) for r in self.repo_ids
+                )
+            else:
+                cache = openvitac_policy.default_tactile_cache(self.repo_id, self.anytouch2_checkpoint)
         repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack)])
         data_transforms = _transforms.Group(
             inputs=[
@@ -408,6 +424,8 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            repo_ids=self.repo_ids,
+            balance_datasets=self.balance_datasets and bool(self.repo_ids),
         )
 
 
@@ -1044,6 +1062,7 @@ def _openvitac_config(
     name: str,
     task: str,
     *,
+    tasks: tuple[str, ...] = (),
     tactile_mode: str | None,
     action_horizon: int = 50,
     repeat_current_frame: bool = False,
@@ -1067,7 +1086,8 @@ def _openvitac_config(
         project_name="tactile_base",
         model=model,
         data=LeRobotOpenViTacDataConfig(
-            repo_id=f"openvitac/{task}_gelsight",
+            repo_id=f"openvitac/{task}_gelsight" if not tasks else f"openvitac/{task}",
+            repo_ids=tuple(f"openvitac/{t}_gelsight" for t in tasks),
             base_config=DataConfig(prompt_from_task=True),
             tactile_mode=tactile_mode,
             repeat_current_frame=repeat_current_frame,
@@ -1091,6 +1111,14 @@ for _task in OPENVITAC_TASKS:
     _CONFIGS.append(_openvitac_config(f"pi05_vision_{_task}", _task, tactile_mode=None))
     _CONFIGS.append(_openvitac_config(f"openvtla_{_task}", _task, tactile_mode="cls_pool2"))
 _CONFIGS.append(_openvitac_config("openvtla_debug", "debug", tactile_mode="cls_pool2"))
+
+# Multi-task: one policy for the four main tasks, every task drawn equally often (the paper trains single-task; same
+# 20k x 64 budget as one single-task run unless overridden with --num-train-steps).
+OPENVITAC_MULTITASK = ("insert_USB", "grasp_chip", "gear_assembly", "empty_can_selection")
+_CONFIGS.append(_openvitac_config("pi05_vision_multitask", "multitask4", tasks=OPENVITAC_MULTITASK, tactile_mode=None))
+_CONFIGS.append(
+    _openvitac_config("openvtla_multitask", "multitask4", tasks=OPENVITAC_MULTITASK, tactile_mode="cls_pool2")
+)
 
 
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}

@@ -127,19 +127,39 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
-def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
-) -> Dataset:
-    """Create a dataset for training."""
-    repo_id = data_config.repo_id
-    if repo_id is None:
-        raise ValueError("Repo ID is not set. Cannot create dataset.")
-    if repo_id == "fake":
-        return FakeDataset(model_config, num_samples=1024)
+class _SetDatasetIndex(_transforms.DataTransformFn):
+    """Tags each sample of one dataset of a multi-dataset (multi-task) mixture with its position in `repo_ids`."""
 
+    def __init__(self, index: int):
+        self.index = index
+
+    def __call__(self, data: dict) -> dict:
+        return {**data, "dataset_index": np.int64(self.index)}
+
+
+class ConcatDataset(Dataset):
+    """Concatenation of the datasets of a multi-task mixture; `sample_weights` draw every dataset equally often."""
+
+    def __init__(self, datasets: Sequence[Dataset]):
+        self._datasets = list(datasets)
+        self._ends = np.cumsum([len(d) for d in self._datasets])
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        i = index.__index__()
+        d = int(np.searchsorted(self._ends, i, side="right"))
+        return self._datasets[d][i - (int(self._ends[d - 1]) if d > 0 else 0)]
+
+    def __len__(self) -> int:
+        return int(self._ends[-1])
+
+    def sample_weights(self) -> np.ndarray:
+        return np.concatenate([np.full(len(d), 1.0 / len(d)) for d in self._datasets])
+
+
+def _create_lerobot_dataset(repo_id: str, data_config: _config.DataConfig, action_horizon: int) -> Dataset:
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
+        repo_id,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
@@ -149,6 +169,25 @@ def create_torch_dataset(
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
     return dataset
+
+
+def create_torch_dataset(
+    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+) -> Dataset:
+    """Create a dataset for training."""
+    repo_id = data_config.repo_id
+    if repo_id is None:
+        raise ValueError("Repo ID is not set. Cannot create dataset.")
+    if repo_id == "fake":
+        return FakeDataset(model_config, num_samples=1024)
+    if data_config.repo_ids:
+        return ConcatDataset(
+            [
+                TransformedDataset(_create_lerobot_dataset(r, data_config, action_horizon), [_SetDatasetIndex(i)])
+                for i, r in enumerate(data_config.repo_ids)
+            ]
+        )
+    return _create_lerobot_dataset(repo_id, data_config, action_horizon)
 
 
 def create_rlds_dataset(
@@ -300,12 +339,21 @@ def create_torch_data_loader(
         seed: The seed to use for shuffling the data.
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    raw_dataset = dataset
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size
     # For JAX, divide by process count
     sampler = None
+    if data_config.balance_datasets and isinstance(raw_dataset, ConcatDataset) and shuffle:
+        if framework == "pytorch" and torch.distributed.is_initialized():
+            raise NotImplementedError("balance_datasets is not supported with PyTorch DDP")
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        sampler = torch.utils.data.WeightedRandomSampler(
+            raw_dataset.sample_weights(), num_samples=len(raw_dataset), replacement=True, generator=generator
+        )
     if framework == "pytorch":
         if torch.distributed.is_initialized():
             sampler = torch.utils.data.distributed.DistributedSampler(
