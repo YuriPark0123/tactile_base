@@ -60,9 +60,23 @@ class OpenViTacInputs(transforms.DataTransformFn):
     anytouch2_checkpoint: str = "checkpoint-4frames.pth"
     # Replace the tactile history with copies of the current frame (temporal ablation, paper Tab. S6).
     repeat_current_frame: bool = False
+    # Path of the cached per-frame contact score [N] in [0,1] (training only). Gates the contact-conditioned
+    # auxiliary losses so they only act once object contact has begun. None -> always 1 (no gating).
+    contact_cache: str | None = None
 
     _memmaps: ClassVar[dict] = {}
     _encoders: ClassVar[dict] = {}
+
+    def _contact(self, data: dict) -> np.ndarray:
+        """Per-sample contact score in [0,1]. Training reads the cached score; inference defaults to 1 (unused by the
+        model at inference, which has no auxiliary losses)."""
+        if "observation/tactile_index" in data and self.contact_cache is not None:
+            mm = self._memmaps.get(self.contact_cache)
+            if mm is None:
+                mm = np.load(self.contact_cache, mmap_mode="r")
+                self._memmaps[self.contact_cache] = mm
+            return np.asarray(mm[int(np.asarray(data["observation/tactile_index"]))], dtype=np.float32)
+        return np.float32(1.0)
 
     def _features(self, data: dict) -> np.ndarray:
         """Returns compact AnyTouch2 features [2, 38, 768]."""
@@ -111,6 +125,7 @@ class OpenViTacInputs(transforms.DataTransformFn):
             tokens = at2.select_tokens(self._features(data), self.tactile_mode)  # [2, k, 768]
             inputs["tactile"] = tokens.reshape(-1, tokens.shape[-1]).astype(np.float32)
             inputs["tactile_mask"] = np.True_
+            inputs["contact"] = self._contact(data)
 
         if "actions" in data:
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
@@ -134,3 +149,10 @@ def default_tactile_cache(repo_id: str, checkpoint: str = "checkpoint-4frames.pt
     from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 
     return str(HF_LEROBOT_HOME / repo_id / "tactile" / f"anytouch2_{pathlib.Path(checkpoint).stem}.npy")
+
+
+def default_contact_cache(repo_id: str, checkpoint: str = "checkpoint-4frames.pth") -> str | None:
+    from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
+
+    path = HF_LEROBOT_HOME / repo_id / "tactile" / f"contact_{pathlib.Path(checkpoint).stem}.npy"
+    return str(path) if path.exists() else None

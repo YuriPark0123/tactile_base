@@ -111,6 +111,9 @@ class Observation(Generic[ArrayT]):
     tactile: at.Float[ArrayT, "*b t d"] | None = None
     # Per-sample tactile validity mask.
     tactile_mask: at.Bool[ArrayT, "*b"] | None = None
+    # Per-sample contact score in [0,1]; gates the contact-conditioned auxiliary losses (margin / eef-alignment /
+    # vision masking) so they only act once object contact has begun. None -> treated as 1 (no gating).
+    contact: at.Float[ArrayT, "*b"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -134,6 +137,7 @@ class Observation(Generic[ArrayT]):
             token_loss_mask=data.get("token_loss_mask"),
             tactile=data.get("tactile"),
             tactile_mask=data.get("tactile_mask"),
+            contact=data.get("contact"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -215,6 +219,7 @@ def preprocess_observation(
         token_loss_mask=observation.token_loss_mask,
         tactile=observation.tactile,
         tactile_mask=observation.tactile_mask,
+        contact=observation.contact,
     )
 
 

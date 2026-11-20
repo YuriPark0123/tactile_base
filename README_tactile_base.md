@@ -25,7 +25,8 @@ below that the paper does not specify are ours.
 - `scripts/train.py`, `TrainConfig.grad_accum_steps` - gradient accumulation (scan over micro-batches).
 - `src/openpi/policies/openvitac_policy.py` - OpenViTac input/output transforms (cached features in training, online
   AnyTouch2 encoding at inference).
-- `src/openpi/training/config.py` - `pi05_vision_<task>` and `openvtla_<task>` configs (bottom of file).
+- `src/openpi/training/config.py` - `pi05_vision_<task>`, `openvtla_<task>` (base) and `openvtla_<task>_margin` (ours)
+  configs (bottom of file).
 - `examples/openvitac/convert_openvitac.py` - FVL-Lab/OpenViTac LeRobot v2.1 -> openpi dataset + AnyTouch2 cache.
 - `third_party/AnyTouch2` - submodule (GeWu-Lab/AnyTouch2). Weights: gated HF repo `xxuan01/AnyTouch2-Model`.
 
@@ -61,6 +62,28 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py openvtla_multitask -
 ```
 
 The paper trains single-task; the default budget (20k x 64) equals one single-task run, i.e. 1/4 of the samples per task.
+
+**Ours** (`openvtla_<task>_margin`): the base OpenVTLA model (`openvtla_<task>`) with the same data, cached features,
+architecture and hyper-parameters, plus three training-only losses (inference is unchanged):
+
+| | Config field | Value |
+|---|---|---|
+| Contrastive tactile margin: flow loss with the real tactile must beat the loss with a wrong tactile (in-batch farthest) by a margin scaled by their feature distance | `tactile_margin_weight` / `tactile_margin_base` / `tactile_neg_mode` / `tactile_dref_pct` | 1.0 / 0.1 / `batch_far` / 50 |
+| Vision feature mask on post-SigLIP image tokens | `vision_feature_mask_prob` | 0.1 |
+| InfoNCE alignment of pooled tactile tokens to the clean wrist-camera (eef view) tokens | `tactile_align_weight` / `tactile_align_temp` | 0.1 / 0.1 |
+
+The margin needs one extra LLM forward per step (~35 s per optimizer step on an RTX 3090, ~8 days per task). With all
+three weights at 0 the loss reduces exactly to the base flow loss, so `openvtla_<task>` is the base for comparison.
+
+```bash
+uv run scripts/compute_norm_stats.py --config-name openvtla_${TASK}_margin   # same stats as openvtla_$TASK
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 uv run scripts/train.py openvtla_${TASK}_margin --exp-name=ours --keep-period None
+```
+
+The code also supports gating these losses by a per-frame contact score (`tactile/contact_checkpoint-4frames.npy` next
+to the AnyTouch2 cache, picked up automatically if present). It is **not used**: do not create that file. (A gate built
+from tactile-image change crossed its threshold at the 2nd frame of every insert_USB episode, i.e. it was all ones and
+equivalent to no file.)
 
 `--keep-period None` keeps only the latest checkpoint (~12 GB each); add `--no-wandb-enabled` without a wandb login.
 Measured on one RTX 3090 (24 GB): ~20 s per optimizer step at batch 64 (~4.6 days per task).

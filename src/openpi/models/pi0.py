@@ -44,6 +44,20 @@ def make_attn_mask(input_mask, mask_ar):
     return jnp.logical_and(attn_mask, valid_mask)
 
 
+def _l2_normalize(x: at.Float[at.Array, "b d"], eps: float = 1e-6):
+    # eps *inside* the rsqrt keeps the gradient finite when a row is (near) zero, unlike x / (norm(x) + eps).
+    return x * jax.lax.rsqrt(jnp.sum(jnp.square(x), axis=-1, keepdims=True) + eps)
+
+
+def _cosine_sim(a: at.Float[at.Array, "b d"], b: at.Float[at.Array, "b d"]):
+    return jnp.sum(_l2_normalize(a) * _l2_normalize(b), axis=-1)
+
+
+def _cosine_sim_matrix(x: at.Float[at.Array, "b d"]):
+    x = _l2_normalize(x)
+    return x @ x.T
+
+
 @at.typecheck
 def posemb_sincos(
     pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: float, max_period: float
@@ -113,57 +127,95 @@ class Pi0(_model.BaseModel):
             else:
                 raise ValueError(f"Unknown tactile_projector: {config.tactile_projector}")
 
+        # Tactile contrastive (margin) loss + vision feature regularization (see Pi0Config).
+        self.tactile_margin_weight = config.tactile_margin_weight
+        self.tactile_margin_base = config.tactile_margin_base
+        self.tactile_neg_mode = config.tactile_neg_mode
+        self.tactile_dref_pct = config.tactile_dref_pct
+        self.vision_feature_noise_std = config.vision_feature_noise_std
+        self.vision_feature_mask_prob = config.vision_feature_mask_prob
+        self.tactile_align_weight = config.tactile_align_weight
+        self.tactile_align_temp = config.tactile_align_temp
+        self.tactile_align_eef_view = config.tactile_align_eef_view
+        self.tactile_align_context_view = config.tactile_align_context_view
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
-    @at.typecheck
-    def embed_prefix(
-        self, obs: _model.Observation
-    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
-        input_mask = []
-        ar_mask = []
-        tokens = []
-        # embed tactile tokens first: they are prepended to the visual token sequence (OpenVTLA ① token concat).
-        if self.tactile_tokens > 0:
-            if obs.tactile is None:
-                raise ValueError("Model has a tactile projector but observation.tactile is None")
-            t = self.tactile_norm(obs.tactile.astype(jnp.float32))
-            t = self.tactile_proj_in(t)
-            if self.tactile_proj_out is not None:
-                t = self.tactile_proj_out(nnx.gelu(t, approximate=True))
-            tactile_tokens = t.astype(self.tactile_dtype)
-            tokens.append(tactile_tokens)
-            tmask = obs.tactile_mask
-            if tmask is None:
-                tmask = jnp.ones(obs.tactile.shape[0], dtype=jnp.bool_)
-            input_mask.append(einops.repeat(tmask, "b -> b s", s=tactile_tokens.shape[1]))
-            ar_mask += [False] * tactile_tokens.shape[1]
-        # embed images
-        for name in obs.images:
+    def _tactile_tokens(self, tactile: at.Float[at.Array, "b t d"]) -> at.Float[at.Array, "b t emb"]:
+        """Project cached tactile features to the VLM width (shared by the real and negative forwards)."""
+        t = self.tactile_norm(tactile.astype(jnp.float32))
+        t = self.tactile_proj_in(t)
+        if self.tactile_proj_out is not None:
+            t = self.tactile_proj_out(nnx.gelu(t, approximate=True))
+        return t.astype(self.tactile_dtype)
+
+    def _embed_images_text(
+        self,
+        obs: _model.Observation,
+        *,
+        train: bool = False,
+        rng: at.KeyArrayLike | None = None,
+        contact_gate: at.Float[at.Array, " b"] | None = None,
+    ):
+        """Image (post-SigLIP, optionally noised/masked) + language tokens. Independent of tactile, so it is computed
+        once and reused across the real/negative tactile forwards of the contrastive loss. Vision noise/mask is scaled
+        per-sample by `contact_gate` so vision is left intact until contact begins (base policy stays a normal VLA)."""
+        tokens, input_mask, ar_mask = [], [], []
+        view_pooled = {}  # clean (pre-aug) per-view pooled image embedding, for the tactile<->eef-view alignment loss
+        img_names = list(obs.images)
+        aug = train and rng is not None and (self.vision_feature_noise_std > 0 or self.vision_feature_mask_prob > 0)
+        rngs = jax.random.split(rng, 2 * max(len(img_names), 1)) if aug else None
+        for idx, name in enumerate(img_names):
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
-
+            view_pooled[name] = jnp.mean(image_tokens.astype(jnp.float32), axis=1)  # [b, emb], before noise/mask
+            imask = einops.repeat(obs.image_masks[name], "b -> b s", s=image_tokens.shape[1])
+            if aug:
+                if self.vision_feature_noise_std > 0:
+                    noise = self.vision_feature_noise_std * jax.random.normal(
+                        rngs[2 * idx], image_tokens.shape, dtype=jnp.float32
+                    )
+                    if contact_gate is not None:
+                        noise = noise * contact_gate[:, None, None]
+                    image_tokens = image_tokens + noise.astype(image_tokens.dtype)
+                if self.vision_feature_mask_prob > 0:
+                    drop = self.vision_feature_mask_prob
+                    thr = drop if contact_gate is None else drop * contact_gate[:, None]  # [b, 1]
+                    keep = jax.random.uniform(rngs[2 * idx + 1], imask.shape) >= thr
+                    imask = jnp.logical_and(imask, keep)
             tokens.append(image_tokens)
-            input_mask.append(
-                einops.repeat(
-                    obs.image_masks[name],
-                    "b -> b s",
-                    s=image_tokens.shape[1],
-                )
-            )
-            # image tokens attend to each other
+            input_mask.append(imask)
             ar_mask += [False] * image_tokens.shape[1]
-
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
             tokenized_inputs = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
             tokens.append(tokenized_inputs)
             input_mask.append(obs.tokenized_prompt_mask)
-            # full attention between image and language inputs
             ar_mask += [False] * tokenized_inputs.shape[1]
-        tokens = jnp.concatenate(tokens, axis=1)
-        input_mask = jnp.concatenate(input_mask, axis=1)
-        ar_mask = jnp.array(ar_mask)
-        return tokens, input_mask, ar_mask
+        return tokens, input_mask, ar_mask, view_pooled
+
+    def _assemble_prefix(self, imgtext, tactile, tactile_mask):
+        """Prepend tactile tokens (OpenVTLA ① token concat) to a precomputed image+text sequence."""
+        tokens, input_mask, ar_mask = [], [], []
+        if self.tactile_tokens > 0:
+            if tactile is None:
+                raise ValueError("Model has a tactile projector but observation.tactile is None")
+            tt = self._tactile_tokens(tactile)
+            tokens.append(tt)
+            tmask = tactile_mask if tactile_mask is not None else jnp.ones(tactile.shape[0], dtype=jnp.bool_)
+            input_mask.append(einops.repeat(tmask, "b -> b s", s=tt.shape[1]))
+            ar_mask += [False] * tt.shape[1]
+        it_tokens, it_mask, it_ar = imgtext[0], imgtext[1], imgtext[2]
+        tokens += it_tokens
+        input_mask += it_mask
+        ar_mask += it_ar
+        return jnp.concatenate(tokens, axis=1), jnp.concatenate(input_mask, axis=1), jnp.array(ar_mask)
+
+    def embed_prefix(
+        self, obs: _model.Observation, *, train: bool = False, rng: at.KeyArrayLike | None = None
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
+        imgtext = self._embed_images_text(obs, train=train, rng=rng)
+        return self._assemble_prefix(imgtext, obs.tactile, obs.tactile_mask)
 
     @at.typecheck
     def embed_suffix(
@@ -218,7 +270,7 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        preprocess_rng, noise_rng, time_rng, vision_rng = jax.random.split(rng, 4)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
@@ -228,19 +280,98 @@ class Pi0(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        # one big forward pass of prefix + suffix at once
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        # Image+language and the action suffix do not depend on the tactile input, so build them once and reuse them
+        # for both the real and (optionally) the negative tactile forward passes. Vision feature noise/mask is applied
+        # here, once, so the real/negative passes differ *only* in the tactile tokens.
+        imgtext = self._embed_images_text(observation, train=train, rng=vision_rng, contact_gate=observation.contact)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-        attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
-        )
-        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        def _flow_loss(tactile):
+            prefix_tokens, prefix_mask, prefix_ar_mask = self._assemble_prefix(
+                imgtext, tactile, observation.tactile_mask
+            )
+            input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+            ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+            attn_mask = make_attn_mask(input_mask, ar_mask)
+            positions = jnp.cumsum(input_mask, axis=1) - 1
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+            )
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            return jnp.mean(jnp.square(v_t - u_t), axis=-1)  # [*b, ah]
+
+        chunked_loss = _flow_loss(observation.tactile)
+
+        # No tactile -> no tactile-based auxiliary losses (also covers vision-only pi05_vision configs).
+        if self.tactile_tokens == 0 or observation.tactile is None:
+            return chunked_loss
+
+        extra = jnp.zeros(chunked_loss.shape[:-1], dtype=chunked_loss.dtype)  # [*b], accumulates auxiliary terms
+        tmask = (
+            observation.tactile_mask.astype(chunked_loss.dtype)
+            if observation.tactile_mask is not None
+            else jnp.ones(chunked_loss.shape[:-1], dtype=chunked_loss.dtype)
+        )
+        # Contact gating: the auxiliary losses only act once object contact has begun (never after — the gate is
+        # computed to turn on no later than contact onset). `contact` is 1 before gating is available.
+        gate = tmask if observation.contact is None else tmask * observation.contact.astype(chunked_loss.dtype)
+
+        # (1) Tactile contrastive margin (adaptive). Runs one extra LLM forward with a "wrong" tactile; the required
+        # gap scales with how different the negative actually is, so a coincidentally-similar negative contributes ~0.
+        if self.tactile_margin_weight > 0.0:
+            neg_tactile = self._tactile_negatives(observation.tactile)
+            wrong_chunked = _flow_loss(neg_tactile)
+            loss_real = jnp.mean(chunked_loss, axis=-1)  # [*b]
+            loss_wrong = jnp.mean(wrong_chunked, axis=-1)  # [*b]
+            pooled_real = jnp.mean(observation.tactile.astype(jnp.float32), axis=1)  # [*b, d]
+            pooled_neg = jnp.mean(neg_tactile.astype(jnp.float32), axis=1)
+            dist = 1.0 - _cosine_sim(pooled_real, pooled_neg)  # [*b], in [0, 2]
+            d_ref = jax.lax.stop_gradient(jnp.percentile(dist, self.tactile_dref_pct)) + 1e-6
+            margin = self.tactile_margin_base * jnp.clip(dist / d_ref, 0.0, 1.0)  # [*b]
+            margin_loss = jax.nn.relu(margin + loss_real - loss_wrong) * gate  # [*b], contact-gated
+            extra = extra + self.tactile_margin_weight * margin_loss
+
+        # (2) Tactile <-> eef(wrist)-view alignment (InfoNCE over the batch). No extra forward: uses the clean pooled
+        # image embeddings already produced by _embed_images_text and the projected tactile tokens.
+        if self.tactile_align_weight > 0.0 and self.tactile_align_eef_view in imgtext[3]:
+            pooled_tactile = jnp.mean(self._tactile_tokens(observation.tactile).astype(jnp.float32), axis=1)  # [*b, e]
+            align_loss = self._alignment_loss(pooled_tactile, imgtext[3]) * gate  # [*b], contact-gated
+            extra = extra + self.tactile_align_weight * align_loss
+
+        # Fold the per-sample auxiliary terms into the chunked loss so that jnp.mean(returned) == mean(base) +
+        # sum of weighted aux means; keeps the [*b, ah] contract and needs no train-loop change.
+        return chunked_loss + extra[..., None]
+
+    def _alignment_loss(self, pooled_tactile, view_pooled):
+        """InfoNCE pulling each sample's pooled tactile toward its own wrist(eef)-view embedding and away from other
+        samples' wrist views and from its own head/context view (option 1)."""
+        t = _l2_normalize(pooled_tactile)  # [b, e]
+        e = _l2_normalize(view_pooled[self.tactile_align_eef_view])  # [b, e]
+        logits = (t @ e.T) / self.tactile_align_temp  # [b, b]: tactile_i vs wrist_j (positive = diagonal)
+        if self.tactile_align_context_view in view_pooled:
+            c = _l2_normalize(view_pooled[self.tactile_align_context_view])
+            sim_ctx = jnp.sum(t * c, axis=-1, keepdims=True) / self.tactile_align_temp  # [b, 1]: vs head (hard neg)
+            logits = jnp.concatenate([logits, sim_ctx], axis=1)  # [b, b+1]
+        b = logits.shape[0]
+        logp = logits - jax.nn.logsumexp(logits, axis=1, keepdims=True)
+        return -logp[jnp.arange(b), jnp.arange(b)]  # [b]
+
+    def _tactile_negatives(self, tactile: at.Float[at.Array, "b t d"]) -> at.Float[at.Array, "b t d"]:
+        """A "wrong" tactile for each sample, drawn from the same batch (different episode/time).
+
+        - "batch_roll": the next sample in the batch (simple random negative).
+        - "batch_far": the in-batch sample whose pooled tactile feature is farthest away (hardest-to-confuse
+          negative), which lowers the chance of a coincidentally-similar false negative.
+        """
+        if self.tactile_neg_mode == "batch_roll":
+            return jnp.roll(tactile, shift=1, axis=0)
+        if self.tactile_neg_mode == "batch_far":
+            pooled = jnp.mean(tactile.astype(jnp.float32), axis=1)  # [b, d]
+            sim = _cosine_sim_matrix(pooled)  # [b, b]
+            sim = sim + jnp.eye(sim.shape[0], dtype=sim.dtype) * 1e9  # exclude self (most similar)
+            idx = jnp.argmin(sim, axis=1)  # farthest (least similar) in-batch sample
+            return tactile[idx]
+        raise ValueError(f"Unknown tactile_neg_mode: {self.tactile_neg_mode}")
 
     @override
     def sample_actions(

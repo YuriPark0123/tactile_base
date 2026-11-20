@@ -390,6 +390,7 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
             "prompt": "prompt",
         }
         cache = None
+        contact_cache = None
         if self.tactile_mode is not None:
             repack["observation/tactile_index"] = "index"
             if self.repo_ids:  # one AnyTouch2 cache per dataset, chosen by the sample's dataset_index
@@ -399,6 +400,7 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
                 )
             else:
                 cache = openvitac_policy.default_tactile_cache(self.repo_id, self.anytouch2_checkpoint)
+                contact_cache = openvitac_policy.default_contact_cache(self.repo_id, self.anytouch2_checkpoint)
         repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack)])
         data_transforms = _transforms.Group(
             inputs=[
@@ -408,6 +410,7 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
                     tactile_cache=cache,
                     anytouch2_checkpoint=self.anytouch2_checkpoint,
                     repeat_current_frame=self.repeat_current_frame,
+                    contact_cache=contact_cache,
                 )
             ],
             outputs=[openvitac_policy.OpenViTacOutputs()],
@@ -1067,6 +1070,14 @@ def _openvitac_config(
     action_horizon: int = 50,
     repeat_current_frame: bool = False,
     tactile_projector: str = "mlp",
+    tactile_margin_weight: float = 0.0,
+    tactile_margin_base: float = 0.1,
+    tactile_neg_mode: str = "batch_far",
+    tactile_dref_pct: float = 50.0,
+    vision_feature_noise_std: float = 0.0,
+    vision_feature_mask_prob: float = 0.0,
+    tactile_align_weight: float = 0.0,
+    tactile_align_temp: float = 0.1,
 ) -> TrainConfig:
     from openpi.tactile import anytouch2 as _at2
 
@@ -1080,6 +1091,14 @@ def _openvitac_config(
         action_expert_variant="gemma_300m_lora",
         tactile_tokens=tokens,
         tactile_projector=tactile_projector,
+        tactile_margin_weight=tactile_margin_weight,
+        tactile_margin_base=tactile_margin_base,
+        tactile_neg_mode=tactile_neg_mode,
+        tactile_dref_pct=tactile_dref_pct,
+        vision_feature_noise_std=vision_feature_noise_std,
+        vision_feature_mask_prob=vision_feature_mask_prob,
+        tactile_align_weight=tactile_align_weight,
+        tactile_align_temp=tactile_align_temp,
     )
     return TrainConfig(
         name=name,
@@ -1118,6 +1137,28 @@ OPENVITAC_MULTITASK = ("insert_USB", "grasp_chip", "gear_assembly", "empty_can_s
 _CONFIGS.append(_openvitac_config("pi05_vision_multitask", "multitask4", tasks=OPENVITAC_MULTITASK, tactile_mode=None))
 _CONFIGS.append(
     _openvitac_config("openvtla_multitask", "multitask4", tasks=OPENVITAC_MULTITASK, tactile_mode="cls_pool2")
+)
+
+# Ours = OpenVTLA (base, openvtla_<task>) + three training-only additions; same model, data and cached features:
+#   (1) distance-adaptive contrastive tactile margin (negative = in-batch farthest tactile; one extra LLM forward/step),
+#   (2) vision feature masking on post-SigLIP image tokens (p=0.1),
+#   (3) InfoNCE alignment of pooled tactile tokens to the clean wrist-camera (eef view) tokens.
+# Inference is identical to the base model.
+_CONFIGS.extend(
+    _openvitac_config(
+        f"openvtla_{_task}_margin",
+        _task,
+        tactile_mode="cls_pool2",
+        tactile_margin_weight=1.0,
+        tactile_margin_base=0.1,
+        tactile_neg_mode="batch_far",
+        tactile_dref_pct=50.0,
+        vision_feature_noise_std=0.0,
+        vision_feature_mask_prob=0.1,
+        tactile_align_weight=0.1,
+        tactile_align_temp=0.1,
+    )
+    for _task in OPENVITAC_TASKS
 )
 
 
