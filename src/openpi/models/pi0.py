@@ -138,6 +138,11 @@ class Pi0(_model.BaseModel):
         self.tactile_align_temp = config.tactile_align_temp
         self.tactile_align_eef_view = config.tactile_align_eef_view
         self.tactile_align_context_view = config.tactile_align_context_view
+        self.tactile_event_weight = config.tactile_event_weight
+        self.tactile_event_pos_weight = config.tactile_event_pos_weight
+        if config.tactile_tokens > 0 and config.tactile_event_weight > 0.0:
+            # name matches CheckpointWeightLoader's ".*tactile.*" missing-regex -> initialised fresh when fine-tuning
+            self.tactile_event_head = nnx.Linear(paligemma_config.width, 1, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -337,6 +342,16 @@ class Pi0(_model.BaseModel):
             pooled_tactile = jnp.mean(self._tactile_tokens(observation.tactile).astype(jnp.float32), axis=1)  # [*b, e]
             align_loss = self._alignment_loss(pooled_tactile, imgtext[3]) * gate  # [*b], contact-gated
             extra = extra + self.tactile_align_weight * align_loss
+
+        # (3) Tactile event head: BCE on pooled projected tactile tokens (labels < 0 are unknown and masked).
+        if self.tactile_event_weight > 0.0 and observation.tactile_event is not None:
+            pooled = jnp.mean(self._tactile_tokens(observation.tactile).astype(jnp.float32), axis=1)  # [*b, e]
+            logit = self.tactile_event_head(pooled)[..., 0]  # [*b]
+            y = observation.tactile_event.astype(jnp.float32)
+            known = (y >= 0).astype(jnp.float32) * tmask
+            y = jnp.clip(y, 0.0, 1.0)
+            bce = self.tactile_event_pos_weight * y * jax.nn.softplus(-logit) + (1.0 - y) * jax.nn.softplus(logit)
+            extra = extra + self.tactile_event_weight * bce * known
 
         # Fold the per-sample auxiliary terms into the chunked loss so that jnp.mean(returned) == mean(base) +
         # sum of weighted aux means; keeps the [*b, ah] contract and needs no train-loop change.

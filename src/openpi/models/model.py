@@ -114,6 +114,9 @@ class Observation(Generic[ArrayT]):
     # Per-sample contact score in [0,1]; gates the contact-conditioned auxiliary losses (margin / eef-alignment /
     # vision masking) so they only act once object contact has begun. None -> treated as 1 (no gating).
     contact: at.Float[ArrayT, "*b"] | None = None
+    # Per-sample tactile event label for the auxiliary tactile-event head (e.g. 1 = the insertion is jammed / pressing
+    # misaligned on the slot, 0 = no jam). Negative values = unknown (masked out). Training only.
+    tactile_event: at.Float[ArrayT, "*b"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -138,6 +141,7 @@ class Observation(Generic[ArrayT]):
             tactile=data.get("tactile"),
             tactile_mask=data.get("tactile_mask"),
             contact=data.get("contact"),
+            tactile_event=data.get("tactile_event"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -220,6 +224,7 @@ def preprocess_observation(
         tactile=observation.tactile,
         tactile_mask=observation.tactile_mask,
         contact=observation.contact,
+        tactile_event=observation.tactile_event,
     )
 
 

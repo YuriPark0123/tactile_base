@@ -1,0 +1,121 @@
+--- a/policy/openpi/deploy_policy.py
++++ b/policy/openpi/deploy_policy.py
+@@ -95,6 +95,16 @@
+             self.tactile_image_keys = (tactile_image_key,)
+         else:
+             self.tactile_image_keys = tuple(str(item) for item in tactile_image_key)
++        # OpenVTLA (tactile_base) server: send a tactile history [T,H,W,3] (oldest first, `stride` env steps apart,
++        # clamped at the episode start) plus the first tactile frame of the episode as background, instead of the
++        # single current tactile frame. 0 disables it.
++        self.tactile_history_frames = int(openpi_cfg.get("tactile_history_frames", 0))
++        # Save every episode's executed actions so it can be replayed / re-rendered later (policy/replay_traj).
++        self.save_trajectory = bool(openpi_cfg.get("save_trajectory", True))
++        self._traj: dict[str, list] = {"state": [], "action": []}
++        self._traj_task = None
++        self.tactile_history_stride = max(1, int(openpi_cfg.get("tactile_history_stride", 2)))
++        self._tactile_frames: dict[str, list[np.ndarray]] = {"left": [], "right": []}
+         self.image_color_order = str(openpi_cfg.get("image_color_order", "rgb")).lower()
+         if self.image_color_order not in ("rgb", "bgr"):
+             raise ValueError(f"image_color_order 只支持 'rgb' 或 'bgr'，实际为 {self.image_color_order!r}")
+@@ -201,6 +211,8 @@
+             )
+             print(f"OpenPI debug obs dump step={self._policy_step_index}: {saved_paths}")
+ 
++        if self.send_tactile and self.tactile_history_frames > 0:
++            self._add_tactile_history(obs)
+         if self.temporal_ensemble:
+             action = self._temporal_ensemble_action(obs, task)
+         else:
+@@ -208,6 +220,7 @@
+ 
+         if self.control_mode in ("abs_joint", "relative_joint"):
+             torch_action = sanitize_abs_joint_action(action, task)
++            self._on_executed_action(task, obs, torch_action)
+             if self.force_task_action_repeat is None:
+                 result = task.take_action(
+                     torch_action,
+@@ -240,6 +253,8 @@
+                 )
+         else:
+             raise RuntimeError(f"不支持的 control_mode: {self.control_mode!r}")
++        if self.save_trajectory and self._traj_task is not None:
++            self._traj["success"] = bool(getattr(task, "eval_success", False))
+         self._policy_step_index += 1
+         return result
+ 
+@@ -253,6 +268,7 @@
+             无。
+         """
+ 
++        self._flush_trajectory()
+         self._clear_action_state()
+         self.client.reset()
+ 
+@@ -266,6 +282,7 @@
+             无。
+         """
+ 
++        self._flush_trajectory()
+         self.client.close()
+ 
+     def _get_prompt(self, task) -> str:
+@@ -415,11 +432,59 @@
+             raise ValueError("OpenPI delta EEF chunk 为空，无法 rollout 成 qpos。")
+         return np.ascontiguousarray(np.stack(qpos_actions, axis=0), dtype=np.float64)
+ 
++    def _on_executed_action(self, task, obs: dict, torch_action) -> None:
++        """Called with every abs-qpos action right before it is executed (subclasses may override)."""
++
++        if self.save_trajectory:
++            # policy.reset() runs after task.reset(next seed), so capture seed / outcome now, not at flush time.
++            self._traj_task = task
++            self._traj["seed"] = int(task.cfg.seed)
++            self._traj["save_root"] = str(task.save_root)
++            self._traj["state"].append(np.asarray(obs["observation/state"], dtype=np.float32))
++            self._traj["action"].append(torch_action.detach().cpu().numpy().astype(np.float32))
++
++    def _flush_trajectory(self) -> None:
++        """Write the finished episode to <save_root>/trajectories/<seed>_<result>.npz (abs qpos8 actions as executed)."""
++
++        task, traj = self._traj_task, self._traj
++        self._traj, self._traj_task = {"state": [], "action": []}, None
++        if task is None or not traj["action"]:
++            return
++        from pathlib import Path
++
++        result = "success" if traj.get("success", False) else "failed"
++        out = Path(traj["save_root"]) / "trajectories"
++        out.mkdir(parents=True, exist_ok=True)
++        np.savez_compressed(
++            out / f"{traj['seed']}_{result}.npz",
++            seed=traj["seed"],
++            success=result == "success",
++            state=np.stack(traj["state"]),
++            action=np.stack(traj["action"]),
++        )
++
++    def _add_tactile_history(self, obs: dict) -> None:
++        """Replace observation/<side>_tactile_image by <side>_tactile_history and <side>_tactile_background."""
++
++        n, stride = self.tactile_history_frames, self.tactile_history_stride
++        for side in ("left", "right"):
++            frames = self._tactile_frames[side]
++            frames.append(obs.pop(f"observation/{side}_tactile_image"))
++            t = len(frames) - 1
++            indices = [max(0, t - stride * (n - 1 - k)) for k in range(n)]
++            obs[f"observation/{side}_tactile_history"] = np.stack([frames[i] for i in indices])
++            obs[f"observation/{side}_tactile_background"] = frames[0]
++            # keep frame 0 (background) in place; drop frames that can no longer be indexed
++            keep_from = max(1, t - stride * (n - 1))
++            for i in range(1, keep_from):
++                frames[i] = None
++
+     def _clear_action_state(self) -> None:
+         self._action_chunk = None
+         self._chunk_step = 0
+         self._policy_step_index = 0
+         self._action_predictions.clear()
++        self._tactile_frames = {"left": [], "right": []}
+ 
+ 
+ def _optional_float(value) -> float | None:

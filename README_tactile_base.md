@@ -28,6 +28,9 @@ below that the paper does not specify are ours.
 - `src/openpi/training/config.py` - `pi05_vision_<task>`, `openvtla_<task>` (base) and `openvtla_<task>_margin` (ours)
   configs (bottom of file).
 - `examples/openvitac/convert_openvitac.py` - FVL-Lab/OpenViTac LeRobot v2.1 -> openpi dataset + AnyTouch2 cache.
+- `examples/openvitac/convert_dagger.py` - DAgger rollouts (hdf5) -> openpi dataset + AnyTouch2 cache + jam labels.
+- `examples/openvitac/openvitac_client/` - OpenViTac-side additions: tactile history for the OpenPI client, DAgger
+  collection, trajectory replay.
 - `third_party/AnyTouch2` - submodule (GeWu-Lab/AnyTouch2). Weights: gated HF repo `xxuan01/AnyTouch2-Model`.
 
 ## Usage
@@ -84,6 +87,12 @@ The code also supports gating these losses by a per-frame contact score (`tactil
 to the AnyTouch2 cache, picked up automatically if present). It is **not used**: do not create that file. (A gate built
 from tactile-image change crossed its threshold at the 2nd frame of every insert_USB episode, i.e. it was all ones and
 equivalent to no file.)
+
+**DAgger** (`openvtla_insert_USB_dagger`, `openvtla_insert_USB_dagger_event`): fine-tunes the base model on scripted-expert
+recoveries from the jammed insertion states the base policy itself reaches (collected in the simulator with
+`examples/openvitac/openvitac_client/policy/openpi_dagger`, converted by `examples/openvitac/convert_dagger.py`), optionally
+with a tactile event head that classifies "jammed" from the pooled tactile tokens. See `docs/dagger_insert_USB.md`
+(background, data on HF, B200 commands).
 
 `--keep-period None` keeps only the latest checkpoint (~12 GB each); add `--no-wandb-enabled` without a wandb login.
 Measured on one RTX 3090 (24 GB): ~20 s per optimizer step at batch 64 (~4.6 days per task).

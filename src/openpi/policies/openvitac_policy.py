@@ -63,6 +63,11 @@ class OpenViTacInputs(transforms.DataTransformFn):
     # Path of the cached per-frame contact score [N] in [0,1] (training only). Gates the contact-conditioned
     # auxiliary losses so they only act once object contact has begun. None -> always 1 (no gating).
     contact_cache: str | None = None
+    # Per-frame tactile event labels [N] (training only, see Pi0Config.tactile_event_weight), one path per dataset of
+    # a mixture (selected like `tactile_cache`). A None entry means "dataset without event file": every frame gets
+    # `event_default` (0 = no event; correct for the scripted demonstrations, which never jam). None -> no labels.
+    event_cache: str | tuple[str | None, ...] | None = None
+    event_default: float = 0.0
 
     _memmaps: ClassVar[dict] = {}
     _encoders: ClassVar[dict] = {}
@@ -77,6 +82,18 @@ class OpenViTacInputs(transforms.DataTransformFn):
                 self._memmaps[self.contact_cache] = mm
             return np.asarray(mm[int(np.asarray(data["observation/tactile_index"]))], dtype=np.float32)
         return np.float32(1.0)
+
+    def _event(self, data: dict) -> np.ndarray:
+        path = self.event_cache
+        if not isinstance(path, str):
+            path = path[int(np.asarray(data.get("observation/tactile_dataset", 0)))]
+        if path is None:
+            return np.float32(self.event_default)
+        mm = self._memmaps.get(path)
+        if mm is None:
+            mm = np.load(path, mmap_mode="r")
+            self._memmaps[path] = mm
+        return np.asarray(mm[int(np.asarray(data["observation/tactile_index"]))], dtype=np.float32)
 
     def _features(self, data: dict) -> np.ndarray:
         """Returns compact AnyTouch2 features [2, 38, 768]."""
@@ -126,6 +143,8 @@ class OpenViTacInputs(transforms.DataTransformFn):
             inputs["tactile"] = tokens.reshape(-1, tokens.shape[-1]).astype(np.float32)
             inputs["tactile_mask"] = np.True_
             inputs["contact"] = self._contact(data)
+            if self.event_cache is not None and "observation/tactile_index" in data:
+                inputs["tactile_event"] = self._event(data)
 
         if "actions" in data:
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
@@ -149,6 +168,13 @@ def default_tactile_cache(repo_id: str, checkpoint: str = "checkpoint-4frames.pt
     from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 
     return str(HF_LEROBOT_HOME / repo_id / "tactile" / f"anytouch2_{pathlib.Path(checkpoint).stem}.npy")
+
+
+def default_event_cache(repo_id: str, name: str = "jam") -> str | None:
+    from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
+
+    path = HF_LEROBOT_HOME / repo_id / "tactile" / f"event_{name}.npy"
+    return str(path) if path.exists() else None
 
 
 def default_contact_cache(repo_id: str, checkpoint: str = "checkpoint-4frames.pth") -> str | None:

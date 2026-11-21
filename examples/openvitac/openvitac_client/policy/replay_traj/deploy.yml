@@ -1,0 +1,7 @@
+policy_name: replay_traj
+seed: 0
+instuction_file: null
+replay:
+  # e.g. eval_result/openpi/insert_USB/deploy_openvtla_insert_USB/<run>/trajectories
+  trajectory_dir: null
+  only_success: true

@@ -67,6 +67,14 @@ class Pi0Config(_model.BaseModelConfig):
     tactile_align_eef_view: str = "left_wrist_0_rgb"  # the wrist camera = where the eef is visible (positive)
     tactile_align_context_view: str = "base_0_rgb"  # head camera = same scene, non-eef region (hard negative)
 
+    # --- Tactile event head (DAgger) --------------------------------------------------------------------------------
+    # Auxiliary binary classifier on the pooled projected tactile tokens, trained on per-frame event labels
+    # (`Observation.tactile_event`, e.g. "insertion jammed" from privileged sim state). It makes the tactile tokens
+    # encode coarse contact events/patterns without forcing the action to depend on fine tactile detail (unlike the
+    # margin loss). Training only; 0 disables (and creates no parameters).
+    tactile_event_weight: float = 0.0
+    tactile_event_pos_weight: float = 1.0  # BCE weight of positive (event) frames, for class imbalance
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)

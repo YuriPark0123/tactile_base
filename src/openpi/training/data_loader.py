@@ -140,9 +140,13 @@ class _SetDatasetIndex(_transforms.DataTransformFn):
 class ConcatDataset(Dataset):
     """Concatenation of the datasets of a multi-task mixture; `sample_weights` draw every dataset equally often."""
 
-    def __init__(self, datasets: Sequence[Dataset]):
+    def __init__(self, datasets: Sequence[Dataset], weights: Sequence[float] = ()):
         self._datasets = list(datasets)
         self._ends = np.cumsum([len(d) for d in self._datasets])
+        # Relative sampling weight of each dataset (default: equal).
+        self._weights = np.asarray(weights if weights else [1.0] * len(self._datasets), dtype=np.float64)
+        if len(self._weights) != len(self._datasets):
+            raise ValueError(f"dataset_weights has {len(self._weights)} entries for {len(self._datasets)} datasets")
 
     def __getitem__(self, index: SupportsIndex) -> dict:
         i = index.__index__()
@@ -153,7 +157,7 @@ class ConcatDataset(Dataset):
         return int(self._ends[-1])
 
     def sample_weights(self) -> np.ndarray:
-        return np.concatenate([np.full(len(d), 1.0 / len(d)) for d in self._datasets])
+        return np.concatenate([np.full(len(d), w / len(d)) for d, w in zip(self._datasets, self._weights, strict=True)])
 
 
 def _create_lerobot_dataset(repo_id: str, data_config: _config.DataConfig, action_horizon: int) -> Dataset:
@@ -185,7 +189,8 @@ def create_torch_dataset(
             [
                 TransformedDataset(_create_lerobot_dataset(r, data_config, action_horizon), [_SetDatasetIndex(i)])
                 for i, r in enumerate(data_config.repo_ids)
-            ]
+            ],
+            weights=data_config.dataset_weights,
         )
     return _create_lerobot_dataset(repo_id, data_config, action_horizon)
 

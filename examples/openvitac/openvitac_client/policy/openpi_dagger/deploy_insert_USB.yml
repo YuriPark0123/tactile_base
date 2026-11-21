@@ -1,0 +1,46 @@
+# DAgger collection for insert_USB: OpenPI policy (tactile_base openvtla_insert_USB) + scripted expert takeover on jams.
+# The `openpi` block must match the policy's evaluation config (policy/openpi/abs_joint/deploy_openvtla_insert_USB.yml).
+policy_name: openpi_dagger
+seed: 0
+instruction_type: seen
+instuction_file: null
+eval_from_start: true
+eval_step_timeout_seconds: 0
+eval_action_repeat: 1
+
+openpi:
+  host: "127.0.0.1"
+  port: 8000
+  api_key:
+  websocket_ping_interval:
+  websocket_ping_timeout:
+  websocket_open_timeout: 10
+  websocket_close_timeout: 10
+  prompt: "Pick up the USB plug from the blue slot and insert it into the red USB slot."
+  prompt_from_task_instruction: false
+  control_mode: "abs_joint"
+  state_dim: 8
+  action_dim: 8
+  image_size: 224
+  send_tactile: true
+  tactile_image_key: rgb_marker
+  tactile_history_frames: 4
+  tactile_history_stride: 2
+  image_color_order: "rgb"
+  debug_dump_first_n_obs: 0
+  open_loop_horizon: 1
+  temporal_ensemble: true
+  chunk_first_n: 20
+  ensemble_K: 0.01
+  save_trajectory: false
+
+dagger:
+  max_interventions: 2
+  stuck_window: 15        # policy steps without downward progress inside the insertion zone
+  stuck_progress: 0.0005  # m
+  zone_xy: 0.008          # m, insertion zone radius around the slot axis
+  zone_z: 0.025           # m above the inserted pose
+  contact_xy: 0.0012      # m, misalignment counted as a jam once the plug reaches the opening
+  contact_z: 0.0139       # m, plug length (0.0124) + 1.5 mm
+  lift: 0.010             # m
+  expert_frame_every: 2   # sim steps per recorded expert frame (scripted demos are saved every 2 sim steps)

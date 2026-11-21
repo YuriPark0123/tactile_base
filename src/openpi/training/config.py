@@ -96,6 +96,8 @@ class DataConfig:
     repo_ids: Sequence[str] = ()
     # With `repo_ids`: draw every dataset equally often instead of in proportion to its number of frames.
     balance_datasets: bool = False
+    # With `balance_datasets`: relative sampling weight per dataset (default: equal).
+    dataset_weights: Sequence[float] = ()
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -379,6 +381,11 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
     # Train on joint deltas relative to the current state (gripper stays absolute); the server converts back, so the
     # client always receives absolute joint targets.
     delta_joint_actions: bool = True
+    # With `repo_ids` and `balance_datasets`: relative sampling weight per dataset (default: equal).
+    dataset_weights: tuple[float, ...] = ()
+    # Per-frame tactile event labels for the tactile event head (`tactile/event_<name>.npy` next to the AnyTouch2
+    # cache; datasets without the file get label 0, see OpenViTacInputs.event_cache). None -> no labels.
+    event_name: str | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -391,6 +398,7 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
         }
         cache = None
         contact_cache = None
+        event_cache = None
         if self.tactile_mode is not None:
             repack["observation/tactile_index"] = "index"
             if self.repo_ids:  # one AnyTouch2 cache per dataset, chosen by the sample's dataset_index
@@ -401,6 +409,10 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
             else:
                 cache = openvitac_policy.default_tactile_cache(self.repo_id, self.anytouch2_checkpoint)
                 contact_cache = openvitac_policy.default_contact_cache(self.repo_id, self.anytouch2_checkpoint)
+            if self.event_name is not None:
+                event_cache = tuple(
+                    openvitac_policy.default_event_cache(r, self.event_name) for r in (self.repo_ids or (self.repo_id,))
+                )
         repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack)])
         data_transforms = _transforms.Group(
             inputs=[
@@ -411,6 +423,7 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
                     anytouch2_checkpoint=self.anytouch2_checkpoint,
                     repeat_current_frame=self.repeat_current_frame,
                     contact_cache=contact_cache,
+                    event_cache=event_cache,
                 )
             ],
             outputs=[openvitac_policy.OpenViTacOutputs()],
@@ -429,6 +442,7 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             repo_ids=self.repo_ids,
             balance_datasets=self.balance_datasets and bool(self.repo_ids),
+            dataset_weights=self.dataset_weights,
         )
 
 
@@ -1161,6 +1175,43 @@ _CONFIGS.extend(
     for _task in OPENVITAC_TASKS
 )
 
+
+# DAgger fine-tuning of the base OpenVTLA model (see docs/dagger_insert_USB.md). Data: the scripted demonstrations plus
+# `openvitac/insert_USB_dagger_gelsight` (expert recoveries from the base policy's own jammed states + its successful
+# rollouts), converted by examples/openvitac/convert_dagger.py. Starts from the base checkpoint and keeps its
+# normalization stats, so the expected local layout is checkpoints/openvtla_insert_USB/baseline/19999 (HF
+# yrpark/openvtla-insert_USB). `_event` adds the tactile event head ("insertion jammed" labels).
+DAGGER_BASE_CKPT = "./checkpoints/openvtla_insert_USB/baseline/19999"
+
+
+def _openvitac_dagger_config(name: str, *, tactile_event_weight: float = 0.0, dagger_weight: float = 1.0):
+    base = _openvitac_config(name, "insert_USB", tactile_mode="cls_pool2")
+    model = dataclasses.replace(base.model, tactile_event_weight=tactile_event_weight, tactile_event_pos_weight=5.0)
+    return dataclasses.replace(
+        base,
+        model=model,
+        freeze_filter=model.get_freeze_filter(),
+        data=dataclasses.replace(
+            base.data,
+            repo_id="openvitac/insert_USB_gelsight",  # assets id = the base model's norm stats
+            repo_ids=("openvitac/insert_USB_gelsight", "openvitac/insert_USB_dagger_gelsight"),
+            balance_datasets=True,
+            dataset_weights=(1.0, dagger_weight),
+            event_name="jam" if tactile_event_weight > 0 else None,
+            assets=AssetsConfig(assets_dir=f"{DAGGER_BASE_CKPT}/assets", asset_id="openvitac/insert_USB_gelsight"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(f"{DAGGER_BASE_CKPT}/params"),
+        num_train_steps=5_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=200, peak_lr=2.5e-5, decay_steps=5_000, decay_lr=2.5e-6
+        ),
+        save_interval=1_000,
+        keep_period=None,
+    )
+
+
+_CONFIGS.append(_openvitac_dagger_config("openvtla_insert_USB_dagger"))
+_CONFIGS.append(_openvitac_dagger_config("openvtla_insert_USB_dagger_event", tactile_event_weight=0.1))
 
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 
