@@ -24,16 +24,22 @@
    - 걸림 조건: 삽입 구간(축에서 8 mm 이내, 삽입 위치 위 25 mm 이내)에서 (a) 플러그가 입구에 닿았는데(z < 13.9 mm)
      xy 오차 > 1.2 mm, 또는 (b) 15 policy step 동안 0.5 mm 이상 내려가지 못함. episode당 최대 2회 개입.
    - 전문가 프레임은 시연과 같이 sim 2 step마다 기록, action = 다음 프레임의 관절 상태.
-2. **변환** (`examples/openvitac/convert_dagger.py`): 전문가 구간과 개입 없이 성공한 episode만 학습 데이터로 사용
-   (개입이 필요했던 episode의 정책 구간은 교정 대상 행동이므로 제외). 구간마다 별도 LeRobot episode.
+2. **변환** (`examples/openvitac/convert_dagger.py`): 성공한 전문가 회복 구간(끝에서 플러그가 삽입된 구간)과
+   개입 없이 성공한 episode만 학습 데이터로 사용. 개입이 필요했던 episode의 정책 구간은 교정 대상 행동이고,
+   실패한 회복은 "걸린 채 계속 누르기"를 가르치므로 제외. 구간마다 별도 LeRobot episode.
    AnyTouch2 특징은 rollout 전체 기준 history(4프레임, stride 2, 배경 = 첫 tactile 프레임)로 계산 후 잘라냄.
-   걸림 라벨 `tactile/event_jam.npy`: 플러그가 입구 높이(z < 13.9 mm)에서 xy > 1.2 mm 또는 기울기 > 8°.
+   걸림 라벨 `tactile/event_jam.npy` ("입구에서 어긋남" 규칙 = 목표 슬롯 축 8 mm 이내, 3 mm < z < 13.9 mm,
+   xy > 1.2 mm 또는 기울기 > 8°):
+   - 1: 정책이 만든 걸림 상태 = 전문가 구간 시작부터 규칙이 성립하는 동안 (들어 올리기 전까지)
+   - 0: 규칙이 성립하지 않는 프레임
+   - −1 (loss에서 제외): 그 밖에 규칙만 성립하는 프레임 (회복 중 일시적으로 어긋난 채 미끄러져 들어가는 경우 등)
 3. **학습** (B200): base 체크포인트에서 fine-tune, base의 norm stats 그대로 사용. 시연 데이터와 DAgger 데이터를
    50:50으로 샘플링 (`dataset_weights`).
    - `openvtla_insert_USB_dagger`: 행동 복제(BC)만
-   - `openvtla_insert_USB_dagger_event`: + tactile event head (풀링한 tactile 토큰 → 걸림 분류, BCE λ=0.1,
-     양성 가중치 5). tactile 토큰이 "걸림" 같은 굵은 패턴을 표현하도록 유도하되, margin처럼 action을 tactile 세부에
-     민감하게 만드는 압박은 없음. 학습 전용, 추론은 base와 동일.
+   - `openvtla_insert_USB_dagger_event`: + tactile event head (풀링한 tactile 토큰 → L2 정규화 → 선형, 온도 0.1 →
+     걸림 분류, BCE λ=0.1, 양성 가중치 5, 0으로 초기화). tactile 토큰이 "걸림" 같은 굵은 패턴을 표현하도록
+     유도하되, margin처럼 action을 tactile 세부에 민감하게 만드는 압박은 없음. 학습 전용, 추론은 base와 동일.
+     (정규화·0 초기화 없이는 첫 step gradient norm이 7로 clip(1.0)에 걸려 BC gradient까지 줄어들었음. 지금은 0.5~0.7.)
    - 5k step, batch 64, LR 2.5e-5 (warmup 200, cosine → 2.5e-6).
 
 ## 데이터 (HF `yrpark/openvitac-openvtla-data`, public)
@@ -44,7 +50,20 @@
 | `raw/insert_USB_dagger_r1/*.hdf5` | 원본 rollout (재변환용: 다른 걸림 기준, 정책 구간 포함 등) |
 | `lerobot/openvitac/insert_USB_gelsight/` | 기존 스크립트 시연 (변경 없음) |
 
-수집 통계는 `lerobot/openvitac/insert_USB_dagger_gelsight/tactile/anytouch2_meta.json` 참고.
+수집 r1 (3090, base 정책, seed 20000~20099, 평가 seed와 겹치지 않음):
+
+| | episode |
+|---|---|
+| 개입 없이 base 성공 | 31 |
+| 개입 후 성공 (1회 50, 2회 10) | 60 |
+| 실패 (개입 2회 후 8, 개입 없이 1) | 9 |
+
+학습 데이터: 14,956 프레임 = 회복 구간 60개 + base 성공 episode 31개 (실패한 회복 8개 제외).
+걸림 라벨 1: 391 프레임 (회복 구간마다 2~12, 중앙값 6), −1: 809, 나머지 0.
+구간별 상세는 `tactile/anytouch2_meta.json`의 `segments`.
+
+3090 확인: `openvtla_insert_USB_dagger(_event)` 6 step 학습 테스트 통과 (base 가중치 로드, param_norm 1806.36 = base,
+초기 loss: BC만 0.003~0.007, event 포함 0.07).
 
 ## B200에서 학습
 

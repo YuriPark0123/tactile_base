@@ -74,6 +74,7 @@ class Pi0Config(_model.BaseModelConfig):
     # margin loss). Training only; 0 disables (and creates no parameters).
     tactile_event_weight: float = 0.0
     tactile_event_pos_weight: float = 1.0  # BCE weight of positive (event) frames, for class imbalance
+    tactile_event_temp: float = 0.1  # logit = head(l2-normalized pooled tactile) / temp
 
     def __post_init__(self):
         if self.max_token_len is None:

@@ -140,9 +140,18 @@ class Pi0(_model.BaseModel):
         self.tactile_align_context_view = config.tactile_align_context_view
         self.tactile_event_weight = config.tactile_event_weight
         self.tactile_event_pos_weight = config.tactile_event_pos_weight
+        self.tactile_event_temp = config.tactile_event_temp
         if config.tactile_tokens > 0 and config.tactile_event_weight > 0.0:
             # name matches CheckpointWeightLoader's ".*tactile.*" missing-regex -> initialised fresh when fine-tuning
-            self.tactile_event_head = nnx.Linear(paligemma_config.width, 1, rngs=rngs)
+            # zero init: logit 0 at the start of fine-tuning, so the new head does not swamp the (small) flow loss
+            # gradients of a pretrained model with large random logits
+            self.tactile_event_head = nnx.Linear(
+                paligemma_config.width,
+                1,
+                kernel_init=nnx.initializers.zeros_init(),
+                bias_init=nnx.initializers.zeros_init(),
+                rngs=rngs,
+            )
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -346,7 +355,9 @@ class Pi0(_model.BaseModel):
         # (3) Tactile event head: BCE on pooled projected tactile tokens (labels < 0 are unknown and masked).
         if self.tactile_event_weight > 0.0 and observation.tactile_event is not None:
             pooled = jnp.mean(self._tactile_tokens(observation.tactile).astype(jnp.float32), axis=1)  # [*b, e]
-            logit = self.tactile_event_head(pooled)[..., 0]  # [*b]
+            # unit-norm input + temperature keeps this loss's gradient norm comparable to the fine-tuning flow loss
+            # (the projected tokens are large; raw inputs made the global-norm clip shrink the flow gradients)
+            logit = self.tactile_event_head(_l2_normalize(pooled))[..., 0] / self.tactile_event_temp  # [*b]
             y = observation.tactile_event.astype(jnp.float32)
             known = (y >= 0).astype(jnp.float32) * tmask
             y = jnp.clip(y, 0.0, 1.0)

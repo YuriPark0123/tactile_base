@@ -6,14 +6,21 @@ cross a gap):
   * expert segments (source == 1): the scripted recovery from the jammed state the policy reached -> corrective data;
   * whole successful episodes without intervention (the policy's own successes), unless --no-policy-success.
 Policy frames of episodes that needed an intervention (and of failed episodes) are dropped: their actions are the
-behaviour being corrected.
+behaviour being corrected. Expert segments that do not end with the plug inserted (failed recoveries) are dropped too,
+unless --no-expert-success-only.
 
 AnyTouch2 features are computed over the full recorded episode (history = 4 frames, stride 2 recorded frames,
 background = the episode's first tactile frame, exactly what the OpenPI client sends online) and then subset to the
 kept frames, so a segment's first frames still see the tactile history that preceded them.
 
-Jam label (tactile/event_jam.npy, float32 [N]): 1 when the plug is at the slot opening (rel z < --jam-z) and
-misaligned (xy error > --jam-xy) or tilted (> --jam-tilt deg), else 0.
+Jam label (tactile/event_jam.npy, float32 [N]). "At-opening misaligned" rule: plug at the target slot opening (within
+--jam-zone-xy of its axis, --jam-min-z < rel z < --jam-z) and misaligned (xy error > --jam-xy) or tilted
+(> --jam-tilt deg).
+   1  the jammed state the policy reached: the first frames of an expert segment while the rule holds (until the
+      expert's lift clears it)
+   0  frames where the rule does not hold
+  -1  other frames where the rule holds (e.g. transient misalignment while a recovery is still sliding in); unknown,
+      masked out of the tactile event loss
 
 Usage:
   uv run examples/openvitac/convert_dagger.py --src /path/to/eval_result/.../dagger --repo-id openvitac/insert_USB_dagger_gelsight
@@ -52,6 +59,10 @@ class Args:
     jam_z: float = 0.0124 + 0.0015  # m above the inserted pose (plug length + 1.5 mm)
     jam_xy: float = 0.0012  # m
     jam_tilt: float = 8.0  # deg
+    jam_zone_xy: float = 0.008  # m: only frames near the target slot axis can be jams (not the start slot)
+    jam_min_z: float = 0.003  # m: below this the plug is (nearly) inserted
+    expert_success_only: bool = True  # keep only expert segments that end with the plug inserted
+    inserted_xy: float = 0.002  # m, "inserted" = rel z < jam_min_z and xy error < inserted_xy (task success uses 2 mm)
     fps: int = 60
     anytouch2_checkpoint: str = "checkpoint-4frames.pth"
     sensor: str = "gelsight_mini"
@@ -62,24 +73,31 @@ class Args:
     dtype: str = "float16"
 
 
-def segments(source: np.ndarray, *, success: bool, n_interventions: int, args: Args) -> list[tuple[int, int, str]]:
-    segs = []
+def segments(
+    source: np.ndarray, rel: np.ndarray, xy: np.ndarray, *, success: bool, n_interventions: int, args: Args
+) -> tuple[list[tuple[int, int, str]], int]:
+    """Kept (start, end, kind) segments and the number of expert segments dropped as failed recoveries."""
+    segs, dropped = [], 0
     if n_interventions == 0:
         if success and args.policy_success:
             segs.append((0, len(source), "policy_success"))
-        return segs
+        return segs, dropped
     i = 0
     while i < len(source):
         if source[i] == 1:
             j = i
             while j < len(source) and source[j] == 1:
                 j += 1
+            inserted = rel[j - 1, 2] < args.jam_min_z and xy[j - 1] < args.inserted_xy
             if j - i >= args.min_segment:
-                segs.append((i, j, "expert"))
+                if inserted or not args.expert_success_only:
+                    segs.append((i, j, "expert"))
+                else:
+                    dropped += 1
             i = j
         else:
             i += 1
-    return segs
+    return segs, dropped
 
 
 def main(args: Args) -> None:
@@ -95,18 +113,24 @@ def main(args: Args) -> None:
             raise FileExistsError(f"{out} exists; pass --overwrite")
         shutil.rmtree(out)
 
-    plan = []
+    plan, n_dropped = [], 0
     for p in files:
         with h5py.File(p, "r") as f:
-            segs = segments(
+            segs, dropped = segments(
                 f["source"][()],
+                f["rel_xyz"][()],
+                f["xy_err"][()],
                 success=bool(f.attrs["success"]),
                 n_interventions=int(f.attrs["n_interventions"]),
                 args=args,
             )
             plan.append((p, segs))
+            n_dropped += dropped
     total = sum(e - s for _, segs in plan for s, e, _ in segs)
-    print(f"{len(files)} rollouts -> {sum(len(s) for _, s in plan)} segments, {total} frames")
+    print(
+        f"{len(files)} rollouts -> {sum(len(s) for _, s in plan)} segments, {total} frames "
+        f"({n_dropped} failed expert recoveries dropped)"
+    )
 
     dataset = LeRobotDataset.create(
         repo_id=args.repo_id,
@@ -162,7 +186,18 @@ def main(args: Args) -> None:
             for b0 in range(0, n, args.encode_batch):
                 idx = hist[b0 : b0 + args.encode_batch]
                 ep_feats[b0 : b0 + len(idx), s] = encoder.encode(tac[idx], np.repeat(tac[:1], len(idx), axis=0))
-        ep_jam = ((rel[:, 2] < args.jam_z) & ((xy > args.jam_xy) | (tilt > args.jam_tilt))).astype(np.float32)
+        rule = (
+            (xy < args.jam_zone_xy)
+            & (rel[:, 2] > args.jam_min_z)
+            & (rel[:, 2] < args.jam_z)
+            & ((xy > args.jam_xy) | (tilt > args.jam_tilt))
+        )
+        ep_jam = np.where(rule, -1.0, 0.0).astype(np.float32)
+        for s0, _, kind in segs:
+            t = s0
+            while kind == "expert" and t < n and rule[t]:  # the jammed state handed to the expert
+                ep_jam[t] = 1.0
+                t += 1
 
         for s0, s1, kind in segs:
             for t in range(s0, s1):
@@ -177,7 +212,14 @@ def main(args: Args) -> None:
             info["frame"][gidx : gidx + m] = np.arange(s0, s1)
             info["source"][gidx : gidx + m] = source[s0:s1]
             segment_log.append(
-                {"seed": seed, "kind": kind, "start": s0, "end": s1, "jam_frames": int(ep_jam[s0:s1].sum())}
+                {
+                    "seed": seed,
+                    "kind": kind,
+                    "start": s0,
+                    "end": s1,
+                    "jam_frames": int((ep_jam[s0:s1] == 1).sum()),
+                    "unknown_frames": int((ep_jam[s0:s1] < 0).sum()),
+                }
             )
             gidx += m
 
@@ -195,12 +237,22 @@ def main(args: Args) -> None:
         "device": args.device,
         "dtype": args.dtype,
         "frames": int(total),
-        "jam_rule": {"z_below": args.jam_z, "xy_above": args.jam_xy, "tilt_above_deg": args.jam_tilt},
-        "jam_frames": int(jam.sum()),
+        "jam_rule": {
+            "zone_xy_below": args.jam_zone_xy,
+            "z_above": args.jam_min_z,
+            "z_below": args.jam_z,
+            "xy_above": args.jam_xy,
+            "tilt_above_deg": args.jam_tilt,
+        },
+        "jam_frames": int((jam == 1).sum()),
+        "unknown_frames": int((jam < 0).sum()),
+        "dropped_failed_expert_segments": n_dropped,
         "segments": segment_log,
     }
     (out / "tactile" / "anytouch2_meta.json").write_text(json.dumps(meta, indent=1))
-    print(f"wrote {total} frames ({int(jam.sum())} jam) in {len(segment_log)} segments to {out}")
+    print(
+        f"wrote {total} frames ({int((jam == 1).sum())} jam, {int((jam < 0).sum())} unknown) in {len(segment_log)} segments to {out}"
+    )
 
 
 if __name__ == "__main__":
