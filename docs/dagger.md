@@ -22,6 +22,7 @@
 |---|---|---|---|---|---|
 | insert_USB | 3/20 (100 ep: 24%) | 슬롯 입구에서 어긋난 채 걸림 | `insert_USB` / `jam` | `lerobot/openvitac/insert_USB_dagger_gelsight`, `raw/insert_USB_dagger_r1` | `docs/dagger_insert_USB.md` |
 | gear_assembly | 17/20 | 빨간 기어가 축 위 ~4.6 mm에서 톱니에 얹혀 막힌 채 회전 시작 | `gear_assembly` / `blocked` | `lerobot/openvitac/gear_assembly_dagger_gelsight`, `raw/gear_assembly_dagger_r1` | 아래 |
+| empty_can_selection | 12/20 | 캔 무게 오판 (빈 캔을 무겁다고 내려놓거나 무거운 캔을 바구니로) | `empty_can_selection` / `empty` (dense) | `lerobot/openvitac/empty_can_selection_dagger_gelsight`, `raw/empty_can_selection_dagger_r1` | 아래 |
 
 ## B200 학습 (공통)
 
@@ -47,6 +48,9 @@ repo 루트에서 실행 (`checkpoints/openvtla_<task>/baseline/19999`는 상대
 - `--eval_step_timeout_seconds 0` (접촉이 많은 UIPC step이 기본 5초 제한을 넘음).
 - gear_assembly / empty_can_selection은 reset이 120초 기본 제한을 넘음 → `task_config/gelsight_slowreset.yml`
   (`reset_time_limit: 600`, `examples/openvitac/openvitac_client/task_config/`).
+- 전문가 개입 중에는 `task.in_pre_move = True`로 둠: 평가 모드의 `BaseTask.move()`는 pre-move 단계가 아니면 그리퍼
+  목표를 비율이 아닌 qpos로 해석해서 `close_gripper(0.7)` 같은 스크립트 동작이 그리퍼를 닫지 않음 (수집기에서 처리).
+  gear_assembly r1은 이 수정 전에 수집되어 재파지 회복이 대부분 실패함 (실패 회복은 학습 데이터에서 제외됨).
 - 강제 종료한 Isaac Sim이 GPU를 놓기 전에 다음 실행을 시작하면 매우 느려짐 (step당 ~30초): `nvidia-smi` 확인 후 시작.
 
 ## gear_assembly
@@ -76,5 +80,33 @@ repo 루트에서 실행 (`checkpoints/openvtla_<task>/baseline/19999`는 상대
 한계와 다음 라운드:
 - 개입이 32개 중 28개로 많음: 정책이 축 위에서 잠깐 멈추는 정상 동작도 "막힘"으로 감지 (base 단독 성공률 85%).
   `stuck_window`를 늘리면 개입이 줄어 정말 막힌 상태만 남지만 수집 시간이 늘어남.
-- 재파지 경로의 회복 성공률이 낮음 → 회복 실패 12개는 학습 데이터에서 제외됨. 재파지 대신 작은 yaw 흔들기(wiggle)로
+- 재파지 경로의 회복 성공률이 낮음 → 회복 실패 12개는 학습 데이터에서 제외됨. 원인은 위의 평가 모드 그리퍼 해석
+  문제 (재파지에서 그리퍼가 제대로 닫히지 않음) — 수정됨, 재수집하면 회복 성공률이 오를 것. 재파지 대신 작은 yaw 흔들기(wiggle)로
   위상을 찾는 회복이 tactile 활용 관점에서도 더 자연스러움 (미구현).
+
+## empty_can_selection
+
+- base `yrpark/openvtla-empty_can_selection`: 12/20. 실패 8개 모두 무게 오판: 빈 캔(환타)을 들어 보고 무겁다고 내려놓은
+  뒤 무거운 펩시를 바구니에 (3), 무거운 환타를 바구니에 (5, 빈 캔 = 펩시). 두 캔은 외형이 같고 들었을 때의 하중만 다름.
+- 개입 (`tasks/empty_can_selection.py`): 무거운 캔을 든 채 제자리에서 3 cm 이상 옮김 (`carrying_heavy`), 또는 빈 캔을
+  2.5 cm 이상 들어 본 뒤 제자리로 1.2 cm 아래까지 내림 (`returning_empty`).
+- 회복 (스크립트 primitive): `carrying_heavy` → 무거운 캔 제자리 → 빈 캔 잡기 → 들기 → 바구니; `returning_empty` → 다시 들기 → 바구니.
+- 라벨 `event_empty` (dense, `--event-mode dense`): 캔을 들고 있는 프레임마다 1 = 빈 캔, 0 = 무거운 캔, 그 외 −1.
+  tactile이 하중 차이를 직접 구분하도록 학습시키는 신호 (BCE 양성 가중치 1). 이 라벨은 시연 데이터에는 없으므로
+  시연 프레임은 −1 (`event_default`).
+
+수집 r1 (3090, seed 20000~20049, 50 episode, episode당 ~3분):
+
+| | episode |
+|---|---|
+| 개입 없이 base 성공 | 31 |
+| `carrying_heavy` 교정 → 성공 | 10 (10/10) |
+| `returning_empty` 교정 → 실패 | 9 (0/9, 학습 데이터에서 제외) |
+
+학습 데이터: 10,066 프레임 = 교정 구간 10개 + base 성공 31개. 라벨 1 (빈 캔): 4,965, 0 (무거운 캔): 845, −1: 4,256.
+3090 확인: 데이터 로딩 (시연 22,864 + DAgger 10,066; 시연 라벨 −1, DAgger 라벨 0/1/−1 정상).
+
+한계와 다음 라운드:
+- `returning_empty` 교정이 전부 실패 (원인 미확인). 빈 캔을 내려놓는 실패 유형(base 실패의 3/8)에 대한 교정 데이터가
+  없음. 수정 후 재수집 필요.
+- 교정 구간이 10개로 적음 (base 단독 성공률이 높아 개입이 드묾).

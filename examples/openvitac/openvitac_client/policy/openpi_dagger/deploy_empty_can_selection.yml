@@ -1,0 +1,46 @@
+# DAgger collection for empty_can_selection: OpenPI policy (tactile_base openvtla_empty_can_selection) + scripted
+# correction of wrong weight judgements. Use task_config/gelsight_slowreset.yml on an RTX 3090.
+# The `openpi` block must match the policy's evaluation config (policy/openpi/abs_joint/deploy_openvtla_empty_can_selection.yml).
+policy_name: openpi_dagger
+seed: 0
+instruction_type: seen
+instuction_file: null
+eval_from_start: true
+eval_step_timeout_seconds: 0
+eval_action_repeat: 1
+
+openpi:
+  host: "127.0.0.1"
+  port: 8000
+  api_key:
+  websocket_ping_interval:
+  websocket_ping_timeout:
+  websocket_open_timeout: 10
+  websocket_close_timeout: 10
+  prompt: "Find the empty can by touch and place it in the basket."
+  prompt_from_task_instruction: false
+  control_mode: "abs_joint"
+  state_dim: 8
+  action_dim: 8
+  image_size: 224
+  send_tactile: true
+  tactile_image_key: rgb_marker
+  tactile_history_frames: 4
+  tactile_history_stride: 2
+  image_color_order: "rgb"
+  debug_dump_first_n_obs: 0
+  open_loop_horizon: 1
+  temporal_ensemble: true
+  chunk_first_n: 20
+  ensemble_K: 0.01
+  save_trajectory: false
+
+dagger:
+  task: empty_can_selection  # plugin policy/openpi_dagger/tasks/empty_can_selection.py
+  max_interventions: 1    # a correction ends with the empty can in the basket
+  lift_dz: 0.01           # m above its work pose = the can is lifted
+  carry_dxy: 0.03         # m: heavy can moved this far from its work pose = carried to the basket
+  test_dz: 0.025          # m: the empty can was lifted at least this high (weight test)
+  return_dz: 0.012        # m: ... and is being lowered back below this
+  near_dxy: 0.02          # m: ... near its work pose
+  expert_frame_every: 2

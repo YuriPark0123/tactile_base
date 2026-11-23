@@ -386,6 +386,9 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
     # Per-frame tactile event labels for the tactile event head (`tactile/event_<name>.npy` next to the AnyTouch2
     # cache; datasets without the file get label 0, see OpenViTacInputs.event_cache). None -> no labels.
     event_name: str | None = None
+    # Event label for datasets without an event file (the scripted demonstrations): 0 = "no event" (right for onset
+    # failure events, which never happen in the demos), -1 = unknown/masked (needed for dense labels).
+    event_default: float = 0.0
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -424,6 +427,7 @@ class LeRobotOpenViTacDataConfig(DataConfigFactory):
                     repeat_current_frame=self.repeat_current_frame,
                     contact_cache=contact_cache,
                     event_cache=event_cache,
+                    event_default=self.event_default,
                 )
             ],
             outputs=[openvitac_policy.OpenViTacOutputs()],
@@ -1182,7 +1186,14 @@ _CONFIGS.extend(
 # examples/openvitac/convert_dagger.py. Starts from the base checkpoint and keeps its normalization stats; expected local
 # layout: checkpoints/openvtla_<task>/baseline/19999 (HF yrpark/openvtla-<task>). `_event` adds the tactile event head
 # trained on the task's failure-mode labels (tactile/event_<event_name>.npy).
-DAGGER_TASKS = {"insert_USB": "jam", "gear_assembly": "blocked"}  # task -> event label name
+# task -> (event label name, BCE positive weight, label for demo frames): onset failure labels are rare (weight 5) and
+# never occur in the demos (0); empty_can_selection's dense "lifted can is the empty one" label is defined only in the
+# DAgger data (weight 1, demos -1 = masked).
+DAGGER_TASKS = {
+    "insert_USB": ("jam", 5.0, 0.0),
+    "gear_assembly": ("blocked", 5.0, 0.0),
+    "empty_can_selection": ("empty", 1.0, -1.0),
+}
 
 
 def _dagger_base_ckpt(task: str) -> str:
@@ -1190,10 +1201,19 @@ def _dagger_base_ckpt(task: str) -> str:
 
 
 def _openvitac_dagger_config(
-    name: str, task: str, *, event_name: str, tactile_event_weight: float = 0.0, dagger_weight: float = 1.0
+    name: str,
+    task: str,
+    *,
+    event_name: str,
+    tactile_event_weight: float = 0.0,
+    event_pos_weight: float = 5.0,
+    event_default: float = 0.0,
+    dagger_weight: float = 1.0,
 ):
     base = _openvitac_config(name, task, tactile_mode="cls_pool2")
-    model = dataclasses.replace(base.model, tactile_event_weight=tactile_event_weight, tactile_event_pos_weight=5.0)
+    model = dataclasses.replace(
+        base.model, tactile_event_weight=tactile_event_weight, tactile_event_pos_weight=event_pos_weight
+    )
     ckpt = _dagger_base_ckpt(task)
     demos = f"openvitac/{task}_gelsight"
     return dataclasses.replace(
@@ -1207,6 +1227,7 @@ def _openvitac_dagger_config(
             balance_datasets=True,
             dataset_weights=(1.0, dagger_weight),
             event_name=event_name if tactile_event_weight > 0 else None,
+            event_default=event_default,
             assets=AssetsConfig(assets_dir=f"{ckpt}/assets", asset_id=demos),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(f"{ckpt}/params"),
@@ -1219,10 +1240,17 @@ def _openvitac_dagger_config(
     )
 
 
-for _task, _event in DAGGER_TASKS.items():
+for _task, (_event, _pos_weight, _default) in DAGGER_TASKS.items():
     _CONFIGS.append(_openvitac_dagger_config(f"openvtla_{_task}_dagger", _task, event_name=_event))
     _CONFIGS.append(
-        _openvitac_dagger_config(f"openvtla_{_task}_dagger_event", _task, event_name=_event, tactile_event_weight=0.1)
+        _openvitac_dagger_config(
+            f"openvtla_{_task}_dagger_event",
+            _task,
+            event_name=_event,
+            tactile_event_weight=0.1,
+            event_pos_weight=_pos_weight,
+            event_default=_default,
+        )
     )
 
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}

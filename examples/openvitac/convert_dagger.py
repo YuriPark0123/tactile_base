@@ -20,6 +20,8 @@ Event label (tactile/event_<--event-name>.npy, float32 [N]) from the plugin's pe
    0  frames where the rule does not hold
   -1  other frames where the rule holds (e.g. transient misalignment while a recovery is still sliding in); unknown,
       masked out of the tactile event loss
+With --event-mode dense the label is the rule itself wherever the plugin marks it defined (`event_valid`), -1 elsewhere
+(e.g. empty_can_selection: is the lifted can the empty one).
 Rollouts of the first insert_USB collection have no `event_rule`/`goal`; for them the rule is computed from the USB
 diagnostics with the --jam-* options.
 
@@ -55,6 +57,10 @@ class Args:
     src: list[pathlib.Path]  # one or more directories with <seed>_<result>.hdf5 files
     repo_id: str = "openvitac/insert_USB_dagger_gelsight"
     event_name: str = "jam"  # -> tactile/event_<name>.npy (training config `event_name`)
+    # "onset": 1 = failure state handed to the expert, -1 = other frames where the rule holds, 0 = elsewhere (jam-like
+    # events). "dense": label = the plugin's rule wherever `event_valid` (e.g. empty_can_selection: 1 = the lifted can
+    # is the empty one, 0 = the heavy one, -1 = no can lifted).
+    event_mode: str = "onset"
     overwrite: bool = False
     policy_success: bool = True  # also keep successful episodes that needed no intervention
     min_segment: int = 10
@@ -193,6 +199,7 @@ def main(args: Args) -> None:
             data = {k: f[v][()] for k, v in KEYS.items()}
             state, action, source = f["state"][()], f["action"][()], f["source"][()]
             rule, _ = event_rule_and_goal(f, args)
+            valid = f["event_valid"][()].astype(bool) if "event_valid" in f else np.ones(len(rule), bool)
             seed, instruction = int(f.attrs["seed"]), str(f.attrs["instruction"])
         n = len(state)
         hist = np.array([at2.history_indices(t, args.num_frames, args.stride) for t in range(n)])
@@ -202,12 +209,15 @@ def main(args: Args) -> None:
             for b0 in range(0, n, args.encode_batch):
                 idx = hist[b0 : b0 + args.encode_batch]
                 ep_feats[b0 : b0 + len(idx), s] = encoder.encode(tac[idx], np.repeat(tac[:1], len(idx), axis=0))
-        ep_jam = np.where(rule, -1.0, 0.0).astype(np.float32)
-        for s0, _, kind in segs:
-            t = s0
-            while kind == "expert" and t < n and rule[t]:  # the jammed state handed to the expert
-                ep_jam[t] = 1.0
-                t += 1
+        if args.event_mode == "dense":  # the rule itself is the label wherever it is defined
+            ep_jam = np.where(valid, rule.astype(np.float32), -1.0).astype(np.float32)
+        else:  # "onset": 1 only for the failure state handed to the expert
+            ep_jam = np.where(rule, -1.0, 0.0).astype(np.float32)
+            for s0, _, kind in segs:
+                t = s0
+                while kind == "expert" and t < n and rule[t]:  # the failure state handed to the expert
+                    ep_jam[t] = 1.0
+                    t += 1
 
         for s0, s1, kind in segs:
             for t in range(s0, s1):

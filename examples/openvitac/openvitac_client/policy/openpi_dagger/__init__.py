@@ -13,6 +13,7 @@ Output per episode: <eval dir>/dagger/<seed>_<success|failed>.hdf5
                              (same definition as the scripted demonstrations)
     source : uint8 [T]       0 = policy, 1 = expert
     event_rule : uint8 [T]   1 where the plugin's failure-mode rule holds (used for tactile event labels)
+    event_valid: uint8 [T]   0 where the event label is undefined (plugins with dense labels, e.g. "no can lifted")
     goal   : uint8 [T]       1 where the plugin's sub-goal of the recovery is reached (e.g. plug inserted)
     sim_step : int32 [T]
     <plugin diagnostics>     float32 [T,...] task-specific privileged quantities (see the plugin)
@@ -46,8 +47,8 @@ class Policy(OpenPiPolicy):
 
     # ------------------------------------------------------------------ recording
     def _reset_record(self):
-        self._rec: dict[str, list] = {k: [] for k in (*IMAGE_KEYS, "state", "action", "source", "event_rule", "goal",
-                                                      "sim_step")}
+        self._rec: dict[str, list] = {k: [] for k in (*IMAGE_KEYS, "state", "action", "source", "event_rule", "event_valid",
+                                                      "goal", "sim_step")}
         self._diag_rec: dict[str, list] = {}
         self._meta = {}
         self._n_interventions = 0
@@ -70,6 +71,7 @@ class Policy(OpenPiPolicy):
         r["action"].append(None)
         r["source"].append(source)
         r["event_rule"].append(int(bool(self.plugin.event_rule(diag))))
+        r["event_valid"].append(int(bool(self.plugin.event_valid(diag))) if hasattr(self.plugin, "event_valid") else 1)
         r["goal"].append(int(bool(self.plugin.goal_reached(diag))))
         r["sim_step"].append(int(task.step_count))
         for k, v in diag.items():
@@ -101,6 +103,7 @@ class Policy(OpenPiPolicy):
             f["action"] = np.stack(r["action"])
             f["source"] = np.asarray(r["source"], np.uint8)
             f["event_rule"] = np.asarray(r["event_rule"], np.uint8)
+            f["event_valid"] = np.asarray(r["event_valid"], np.uint8)
             f["goal"] = np.asarray(r["goal"], np.uint8)
             f["sim_step"] = np.asarray(r["sim_step"], np.int32)
             for k, v in self._diag_rec.items():
@@ -128,6 +131,11 @@ class Policy(OpenPiPolicy):
             return out
 
         task._step = recording_step
+        # In eval mode BaseTask.move() treats gripper targets as raw qpos unless the task is in its pre-move phase,
+        # while the scripted primitives (close_gripper(percent), adaptive grasp) expect the collection semantics.
+        # Use the scripted-demo gripper path for the takeover.
+        prev_in_pre_move = task.in_pre_move
+        task.in_pre_move = True
         try:
             # the state the policy reached is the first expert frame
             task._update_render()
@@ -135,6 +143,7 @@ class Policy(OpenPiPolicy):
             self.plugin.recover(task, reason)
         finally:
             task._step = original_step
+            task.in_pre_move = prev_in_pre_move
         if task.plan_success is not False and task.check_success():
             task.eval_success = True
         # robot state jumped: drop chunk predictions made before the intervention
