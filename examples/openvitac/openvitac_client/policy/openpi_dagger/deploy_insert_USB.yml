@@ -35,6 +35,7 @@ openpi:
   save_trajectory: false
 
 dagger:
+  task: insert_USB        # plugin policy/openpi_dagger/tasks/insert_USB.py
   max_interventions: 2
   stuck_window: 15        # policy steps without downward progress inside the insertion zone
   stuck_progress: 0.0005  # m
@@ -43,4 +44,7 @@ dagger:
   contact_xy: 0.0012      # m, misalignment counted as a jam once the plug reaches the opening
   contact_z: 0.0139       # m, plug length (0.0124) + 1.5 mm
   lift: 0.010             # m
+  min_z: 0.003            # m, below this the plug counts as inserted (goal) / not at the opening
+  event_tilt_deg: 8.0     # tilt counted as misaligned for the event rule
+  inserted_xy: 0.002      # m
   expert_frame_every: 2   # sim steps per recorded expert frame (scripted demos are saved every 2 sim steps)

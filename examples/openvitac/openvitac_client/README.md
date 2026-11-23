@@ -8,14 +8,16 @@ not on the training server.
 cd /path/to/OpenViTac
 git apply /path/to/tactile_base/examples/openvitac/openvitac_client/openpi_tactile_history.patch
 cp -r /path/to/tactile_base/examples/openvitac/openvitac_client/policy/* policy/
+cp /path/to/tactile_base/examples/openvitac/openvitac_client/task_config/* task_config/
 pip install websockets msgpack   # in the OpenViTac conda env (the OpenPI client protocol)
 ```
 
 | File | What it is |
 |---|---|
 | `openpi_tactile_history.patch` | `policy/openpi/deploy_policy.py`: sends the tactile history + background that the AnyTouch2 models need (`tactile_history_frames`, `tactile_history_stride`), saves every episode's executed actions to `<eval dir>/trajectories/<seed>_<result>.npz` (`save_trajectory`, default on), and an `_on_executed_action` hook |
-| `policy/openpi/abs_joint/deploy_openvtla_insert_USB.yml` | evaluation config for `openvtla_insert_USB*` servers (temporal ensemble, 4-frame tactile history, stride 2) |
-| `policy/openpi_dagger/` | DAgger collection: the policy runs; on a jam (privileged sim state) a scripted expert lifts, re-aligns and inserts; every frame is recorded (`<eval dir>/dagger/<seed>_<result>.hdf5`) |
+| `policy/openpi/abs_joint/deploy_openvtla_<task>.yml` | evaluation configs for `openvtla_<task>*` servers (temporal ensemble, 4-frame tactile history, stride 2; the dataset's task prompt) for insert_USB, gear_assembly, empty_can_selection, grasp_chip |
+| `policy/openpi_dagger/` | DAgger collection: the policy runs; when the task plugin (`tasks/<task>.py`) detects its failure state from privileged sim state, a scripted expert takes over; every frame is recorded (`<eval dir>/dagger/<seed>_<result>.hdf5`). Plugins: `insert_USB` (jam at the slot opening -> lift, re-align, insert), `gear_assembly` (gear blocked above the shaft -> re-phase, re-insert / re-grasp, turn). Config: `deploy_<task>.yml` |
+| `task_config/gelsight_slowreset.yml` | `gelsight.yml` with `reset_time_limit: 600` (gear_assembly / empty_can_selection resets take > 120 s on an RTX 3090) |
 | `policy/replay_traj/` | re-executes saved trajectories (re-rendering, no policy server) |
 
 Evaluation (20 episodes; the step timeout must be off on an RTX 3090, contact-rich UIPC steps exceed the 5 s default):
@@ -28,13 +30,19 @@ OPENVITAC_LIVESTREAM=0 OMNI_KIT_ACCEPT_EULA=yes python scripts/eval_policy.py in
     --eval_step_timeout_seconds 0 --headless
 ```
 
-DAgger collection (use seeds disjoint from the evaluation seeds):
+DAgger collection (use seeds disjoint from the evaluation seeds; serve the task's base model first):
 
 ```bash
 OPENVITAC_LIVESTREAM=0 OMNI_KIT_ACCEPT_EULA=yes python scripts/eval_policy.py insert_USB task_config/gelsight.yml \
     policy/openpi_dagger/deploy_insert_USB.yml --start_seed 20000 --total_num 100 \
     --eval_step_timeout_seconds 0 --headless
+OPENVITAC_LIVESTREAM=0 OMNI_KIT_ACCEPT_EULA=yes python scripts/eval_policy.py gear_assembly task_config/gelsight_slowreset.yml \
+    policy/openpi_dagger/deploy_gear_assembly.yml --start_seed 20000 --total_num 50 \
+    --eval_step_timeout_seconds 0 --headless
 ```
+
+Then convert on the training side: `uv run examples/openvitac/convert_dagger.py --src <eval dir>/dagger
+--repo-id openvitac/<task>_dagger_gelsight --event-name <jam|blocked>`.
 
 Note: if an Isaac Sim run ends with an exception it can hang without exiting and keep its GPU memory; check
 `nvidia-smi` before starting the next run.

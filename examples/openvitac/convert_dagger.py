@@ -1,26 +1,27 @@
 """Convert DAgger rollouts (OpenViTac `policy/openpi_dagger`, one hdf5 per episode) into an openpi training dataset with
-cached AnyTouch2 features and per-frame tactile event ("jam") labels.
+cached AnyTouch2 features and per-frame tactile event (e.g. "jam") labels.
 
 Which frames become training data (each kept segment is written as its own LeRobot episode, so action chunks never
 cross a gap):
-  * expert segments (source == 1): the scripted recovery from the jammed state the policy reached -> corrective data;
+  * expert segments (source == 1): the scripted recovery from the failure state the policy reached -> corrective data;
   * whole successful episodes without intervention (the policy's own successes), unless --no-policy-success.
 Policy frames of episodes that needed an intervention (and of failed episodes) are dropped: their actions are the
-behaviour being corrected. Expert segments that do not end with the plug inserted (failed recoveries) are dropped too,
-unless --no-expert-success-only.
+behaviour being corrected. Expert segments that do not end at the plugin's goal (`goal`, e.g. plug inserted; failed
+recoveries) are dropped too, unless --no-expert-success-only.
 
 AnyTouch2 features are computed over the full recorded episode (history = 4 frames, stride 2 recorded frames,
 background = the episode's first tactile frame, exactly what the OpenPI client sends online) and then subset to the
 kept frames, so a segment's first frames still see the tactile history that preceded them.
 
-Jam label (tactile/event_jam.npy, float32 [N]). "At-opening misaligned" rule: plug at the target slot opening (within
---jam-zone-xy of its axis, --jam-min-z < rel z < --jam-z) and misaligned (xy error > --jam-xy) or tilted
-(> --jam-tilt deg).
-   1  the jammed state the policy reached: the first frames of an expert segment while the rule holds (until the
-      expert's lift clears it)
+Event label (tactile/event_<--event-name>.npy, float32 [N]) from the plugin's per-frame failure-mode rule
+(`event_rule`; e.g. insert_USB "plug at the opening, misaligned or tilted"):
+   1  the failure state the policy reached: the first frames of an expert segment while the rule holds (until the
+      expert's first move clears it)
    0  frames where the rule does not hold
   -1  other frames where the rule holds (e.g. transient misalignment while a recovery is still sliding in); unknown,
       masked out of the tactile event loss
+Rollouts of the first insert_USB collection have no `event_rule`/`goal`; for them the rule is computed from the USB
+diagnostics with the --jam-* options.
 
 Usage:
   uv run examples/openvitac/convert_dagger.py --src /path/to/eval_result/.../dagger --repo-id openvitac/insert_USB_dagger_gelsight
@@ -53,6 +54,7 @@ KEYS = {
 class Args:
     src: list[pathlib.Path]  # one or more directories with <seed>_<result>.hdf5 files
     repo_id: str = "openvitac/insert_USB_dagger_gelsight"
+    event_name: str = "jam"  # -> tactile/event_<name>.npy (training config `event_name`)
     overwrite: bool = False
     policy_success: bool = True  # also keep successful episodes that needed no intervention
     min_segment: int = 10
@@ -73,8 +75,24 @@ class Args:
     dtype: str = "float16"
 
 
+def event_rule_and_goal(f: h5py.File, args: Args) -> tuple[np.ndarray, np.ndarray]:
+    """Per-frame failure-mode rule and recovery sub-goal. Recorded by the task plugin (`event_rule`, `goal`); rollouts
+    from the first insert_USB collection (before plugins) only have the USB diagnostics, so compute them here."""
+    if "event_rule" in f and "goal" in f:
+        return f["event_rule"][()].astype(bool), f["goal"][()].astype(bool)
+    rel, xy, tilt = f["rel_xyz"][()], f["xy_err"][()], f["tilt_deg"][()]
+    rule = (
+        (xy < args.jam_zone_xy)
+        & (rel[:, 2] > args.jam_min_z)
+        & (rel[:, 2] < args.jam_z)
+        & ((xy > args.jam_xy) | (tilt > args.jam_tilt))
+    )
+    goal = (rel[:, 2] < args.jam_min_z) & (xy < args.inserted_xy)
+    return rule, goal
+
+
 def segments(
-    source: np.ndarray, rel: np.ndarray, xy: np.ndarray, *, success: bool, n_interventions: int, args: Args
+    source: np.ndarray, goal: np.ndarray, *, success: bool, n_interventions: int, args: Args
 ) -> tuple[list[tuple[int, int, str]], int]:
     """Kept (start, end, kind) segments and the number of expert segments dropped as failed recoveries."""
     segs, dropped = [], 0
@@ -88,9 +106,8 @@ def segments(
             j = i
             while j < len(source) and source[j] == 1:
                 j += 1
-            inserted = rel[j - 1, 2] < args.jam_min_z and xy[j - 1] < args.inserted_xy
             if j - i >= args.min_segment:
-                if inserted or not args.expert_success_only:
+                if goal[j - 1] or not args.expert_success_only:
                     segs.append((i, j, "expert"))
                 else:
                     dropped += 1
@@ -118,8 +135,7 @@ def main(args: Args) -> None:
         with h5py.File(p, "r") as f:
             segs, dropped = segments(
                 f["source"][()],
-                f["rel_xyz"][()],
-                f["xy_err"][()],
+                event_rule_and_goal(f, args)[1],
                 success=bool(f.attrs["success"]),
                 n_interventions=int(f.attrs["n_interventions"]),
                 args=args,
@@ -176,7 +192,7 @@ def main(args: Args) -> None:
         with h5py.File(p, "r") as f:
             data = {k: f[v][()] for k, v in KEYS.items()}
             state, action, source = f["state"][()], f["action"][()], f["source"][()]
-            rel, xy, tilt = f["rel_xyz"][()], f["xy_err"][()], f["tilt_deg"][()]
+            rule, _ = event_rule_and_goal(f, args)
             seed, instruction = int(f.attrs["seed"]), str(f.attrs["instruction"])
         n = len(state)
         hist = np.array([at2.history_indices(t, args.num_frames, args.stride) for t in range(n)])
@@ -186,12 +202,6 @@ def main(args: Args) -> None:
             for b0 in range(0, n, args.encode_batch):
                 idx = hist[b0 : b0 + args.encode_batch]
                 ep_feats[b0 : b0 + len(idx), s] = encoder.encode(tac[idx], np.repeat(tac[:1], len(idx), axis=0))
-        rule = (
-            (xy < args.jam_zone_xy)
-            & (rel[:, 2] > args.jam_min_z)
-            & (rel[:, 2] < args.jam_z)
-            & ((xy > args.jam_xy) | (tilt > args.jam_tilt))
-        )
         ep_jam = np.where(rule, -1.0, 0.0).astype(np.float32)
         for s0, _, kind in segs:
             t = s0
@@ -225,7 +235,7 @@ def main(args: Args) -> None:
 
     assert gidx == total, (gidx, total)
     feats.flush()
-    np.save(out / "tactile" / "event_jam.npy", jam)
+    np.save(out / "tactile" / f"event_{args.event_name}.npy", jam)
     np.savez(out / "tactile" / "frame_info.npz", **info)
     meta = {
         "encoder": "AnyTouch2",

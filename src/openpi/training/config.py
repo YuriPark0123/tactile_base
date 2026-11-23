@@ -1176,31 +1176,40 @@ _CONFIGS.extend(
 )
 
 
-# DAgger fine-tuning of the base OpenVTLA model (see docs/dagger_insert_USB.md). Data: the scripted demonstrations plus
-# `openvitac/insert_USB_dagger_gelsight` (expert recoveries from the base policy's own jammed states + its successful
-# rollouts), converted by examples/openvitac/convert_dagger.py. Starts from the base checkpoint and keeps its
-# normalization stats, so the expected local layout is checkpoints/openvtla_insert_USB/baseline/19999 (HF
-# yrpark/openvtla-insert_USB). `_event` adds the tactile event head ("insertion jammed" labels).
-DAGGER_BASE_CKPT = "./checkpoints/openvtla_insert_USB/baseline/19999"
+# DAgger fine-tuning of a base OpenVTLA model (see docs/dagger.md). Data: the task's scripted demonstrations plus
+# `openvitac/<task>_dagger_gelsight` (scripted-expert recoveries from failure states the base policy itself reached + its
+# successful rollouts), collected with examples/openvitac/openvitac_client/policy/openpi_dagger and converted by
+# examples/openvitac/convert_dagger.py. Starts from the base checkpoint and keeps its normalization stats; expected local
+# layout: checkpoints/openvtla_<task>/baseline/19999 (HF yrpark/openvtla-<task>). `_event` adds the tactile event head
+# trained on the task's failure-mode labels (tactile/event_<event_name>.npy).
+DAGGER_TASKS = {"insert_USB": "jam", "gear_assembly": "blocked"}  # task -> event label name
 
 
-def _openvitac_dagger_config(name: str, *, tactile_event_weight: float = 0.0, dagger_weight: float = 1.0):
-    base = _openvitac_config(name, "insert_USB", tactile_mode="cls_pool2")
+def _dagger_base_ckpt(task: str) -> str:
+    return f"./checkpoints/openvtla_{task}/baseline/19999"
+
+
+def _openvitac_dagger_config(
+    name: str, task: str, *, event_name: str, tactile_event_weight: float = 0.0, dagger_weight: float = 1.0
+):
+    base = _openvitac_config(name, task, tactile_mode="cls_pool2")
     model = dataclasses.replace(base.model, tactile_event_weight=tactile_event_weight, tactile_event_pos_weight=5.0)
+    ckpt = _dagger_base_ckpt(task)
+    demos = f"openvitac/{task}_gelsight"
     return dataclasses.replace(
         base,
         model=model,
         freeze_filter=model.get_freeze_filter(),
         data=dataclasses.replace(
             base.data,
-            repo_id="openvitac/insert_USB_gelsight",  # assets id = the base model's norm stats
-            repo_ids=("openvitac/insert_USB_gelsight", "openvitac/insert_USB_dagger_gelsight"),
+            repo_id=demos,  # assets id = the base model's norm stats
+            repo_ids=(demos, f"openvitac/{task}_dagger_gelsight"),
             balance_datasets=True,
             dataset_weights=(1.0, dagger_weight),
-            event_name="jam" if tactile_event_weight > 0 else None,
-            assets=AssetsConfig(assets_dir=f"{DAGGER_BASE_CKPT}/assets", asset_id="openvitac/insert_USB_gelsight"),
+            event_name=event_name if tactile_event_weight > 0 else None,
+            assets=AssetsConfig(assets_dir=f"{ckpt}/assets", asset_id=demos),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(f"{DAGGER_BASE_CKPT}/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(f"{ckpt}/params"),
         num_train_steps=5_000,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=200, peak_lr=2.5e-5, decay_steps=5_000, decay_lr=2.5e-6
@@ -1210,8 +1219,11 @@ def _openvitac_dagger_config(name: str, *, tactile_event_weight: float = 0.0, da
     )
 
 
-_CONFIGS.append(_openvitac_dagger_config("openvtla_insert_USB_dagger"))
-_CONFIGS.append(_openvitac_dagger_config("openvtla_insert_USB_dagger_event", tactile_event_weight=0.1))
+for _task, _event in DAGGER_TASKS.items():
+    _CONFIGS.append(_openvitac_dagger_config(f"openvtla_{_task}_dagger", _task, event_name=_event))
+    _CONFIGS.append(
+        _openvitac_dagger_config(f"openvtla_{_task}_dagger_event", _task, event_name=_event, tactile_event_weight=0.1)
+    )
 
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 

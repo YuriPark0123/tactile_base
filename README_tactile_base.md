@@ -88,11 +88,12 @@ to the AnyTouch2 cache, picked up automatically if present). It is **not used**:
 from tactile-image change crossed its threshold at the 2nd frame of every insert_USB episode, i.e. it was all ones and
 equivalent to no file.)
 
-**DAgger** (`openvtla_insert_USB_dagger`, `openvtla_insert_USB_dagger_event`): fine-tunes the base model on scripted-expert
-recoveries from the jammed insertion states the base policy itself reaches (collected in the simulator with
-`examples/openvitac/openvitac_client/policy/openpi_dagger`, converted by `examples/openvitac/convert_dagger.py`), optionally
-with a tactile event head that classifies "jammed" from the pooled tactile tokens. See `docs/dagger_insert_USB.md`
-(background, data on HF, B200 commands).
+**DAgger** (`openvtla_<task>_dagger`, `openvtla_<task>_dagger_event` for insert_USB and gear_assembly): fine-tunes the
+base model on scripted-expert recoveries from failure states the base policy itself reaches (collected in the simulator
+with `examples/openvitac/openvitac_client/policy/openpi_dagger` and a per-task plugin, converted by
+`examples/openvitac/convert_dagger.py`), optionally with a tactile event head that classifies the task's failure state
+from the pooled tactile tokens. See `docs/dagger.md` (pipeline, per-task status, data on HF, B200 commands) and
+`docs/dagger_insert_USB.md`.
 
 `--keep-period None` keeps only the latest checkpoint (~12 GB each); add `--no-wandb-enabled` without a wandb login.
 Measured on one RTX 3090 (24 GB): ~20 s per optimizer step at batch 64 (~4.6 days per task).
