@@ -9,6 +9,7 @@ cd /path/to/OpenViTac
 git apply /path/to/tactile_base/examples/openvitac/openvitac_client/openpi_tactile_history.patch
 cp -r /path/to/tactile_base/examples/openvitac/openvitac_client/policy/* policy/
 cp /path/to/tactile_base/examples/openvitac/openvitac_client/task_config/* task_config/
+cp /path/to/tactile_base/examples/openvitac/openvitac_client/scripts/* scripts/
 pip install websockets msgpack   # in the OpenViTac conda env (the OpenPI client protocol)
 ```
 
@@ -16,9 +17,10 @@ pip install websockets msgpack   # in the OpenViTac conda env (the OpenPI client
 |---|---|
 | `openpi_tactile_history.patch` | `policy/openpi/deploy_policy.py`: sends the tactile history + background that the AnyTouch2 models need (`tactile_history_frames`, `tactile_history_stride`), saves every episode's executed actions to `<eval dir>/trajectories/<seed>_<result>.npz` (`save_trajectory`, default on), and an `_on_executed_action` hook |
 | `policy/openpi/abs_joint/deploy_openvtla_<task>.yml` | evaluation configs for `openvtla_<task>*` servers (temporal ensemble, 4-frame tactile history, stride 2; the dataset's task prompt) for insert_USB, gear_assembly, empty_can_selection, grasp_chip |
-| `policy/openpi_dagger/` | DAgger collection: the policy runs; when the task plugin (`tasks/<task>.py`) detects its failure state from privileged sim state, a scripted expert takes over; every frame is recorded (`<eval dir>/dagger/<seed>_<result>.hdf5`). Plugins: `insert_USB` (jam at the slot opening -> lift, re-align, insert), `gear_assembly` (gear blocked above the shaft -> re-phase, re-insert / re-grasp, turn). Config: `deploy_<task>.yml` |
+| `policy/openpi_dagger/` | DAgger collection: the policy runs; when the task plugin (`tasks/<task>.py`) detects its failure state from privileged sim state, a scripted expert takes over; every frame is recorded (`<eval dir>/dagger/<seed>_<result>.hdf5`). Plugins: `insert_USB` (jam at the slot opening -> lift, re-align, insert), `gear_assembly` (gear blocked above the shaft -> re-phase, re-insert, wiggle / release + re-grasp, turn), `empty_can_selection` (wrong weight judgement -> return the heavy can / re-grip the empty one, basket). Config: `deploy_<task>.yml` |
 | `task_config/gelsight_slowreset.yml` | `gelsight.yml` with `reset_time_limit: 600` (gear_assembly / empty_can_selection resets take > 120 s on an RTX 3090) |
 | `policy/replay_traj/` | re-executes saved trajectories (re-rendering, no policy server) |
+| `scripts/run_force_seeds.py` | grasp_chip (force task) seed by seed with a solver-speed watchdog: a launch that falls into the slow UIPC state (step 25 later than 60 s) is killed and the same seed relaunched. Copy to `scripts/` of OpenViTac |
 
 Evaluation (20 episodes; the step timeout must be off on an RTX 3090, contact-rich UIPC steps exceed the 5 s default):
 

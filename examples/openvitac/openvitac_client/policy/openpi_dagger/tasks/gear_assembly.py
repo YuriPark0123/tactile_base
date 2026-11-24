@@ -33,7 +33,10 @@ class Expert:
         self.seat_dz = float(cfg.get("seat_dz", 0.005))
         self.off_xy = float(cfg.get("off_xy", 0.0025))
         self.seated_dz = float(cfg.get("seated_dz", 0.002))
-        self.regrasp_dz = float(cfg.get("regrasp_dz", 0.0015))  # re-insert result above this -> release + re-grasp
+        self.regrasp_dz = float(cfg.get("regrasp_dz", 0.002))  # settled re-insert above this -> release + re-grasp
+        self.settle_steps = int(cfg.get("settle_steps", 30))  # steps to let the gear settle before judging the insert
+        self.wiggle_deg = [float(x) for x in cfg.get("wiggle_deg", [2, -2, 4, -4, 6, -6])]
+        self.wiggle_press = float(cfg.get("wiggle_press", 0.0005))  # m pressed below the target height
         self.regrasp_lift = float(cfg.get("regrasp_lift", 0.03))
         self._dz_hist: list[float] = []
 
@@ -80,6 +83,32 @@ class Expert:
             return "blocked_above_shaft"
         return None
 
+    def _dz(self, task) -> float:
+        return float(self.diag(task)["red_rel"][2])
+
+    def _wiggle(self, task):
+        """Teeth on teeth: holding the gear, turn it to +-2, +-4, +-6 deg (half the 12 deg tooth pitch) from where it
+        sits and press it down at each phase until it drops onto the shaft. The blue gear can turn by a few degrees
+        while the red one is pushed onto it (r2 seed 20040: 0.6 deg at the takeover, 2.7 deg after the re-insert), so
+        the pre-computed phase can be off by more than the mesh tolerance."""
+        cur = 0.0
+        for target in self.wiggle_deg:
+            if not task.plan_success:
+                return
+            dz = self._dz(task)
+            task.move(task.atom.move_by_displacement(rpy=[0.0, 0.0, np.deg2rad(target - cur)], xyz_coord="local"),
+                      tag="dagger_wiggle_red_gear", delay=False, time_dilation_factor=0.5)
+            cur = target
+            press = min(dz, 0.003) + self.wiggle_press
+            task.move(task.atom.move_by_displacement(z=-press, xyz_coord="world"),
+                      tag="dagger_press_red_gear", delay=False, time_dilation_factor=0.5)
+            task.delay(self.settle_steps // 3)
+            if self._dz(task) <= self.regrasp_dz:
+                return
+            # back to the same hand height (the gear is still on the teeth) before turning to the next phase
+            task.move(task.atom.move_by_displacement(z=press, xyz_coord="world"),
+                      tag="dagger_unpress_red_gear", delay=False, time_dilation_factor=0.5)
+
     def recover(self, task, reason: str):
         # The pair meshes 1:1 in opposite directions: if the blue gear has turned by b, the red gear's mesh phase is -b.
         d = self.diag(task)
@@ -87,14 +116,22 @@ class Expert:
         if np.isfinite(d["blue_yaw"]) and abs(d["blue_yaw"]) > 0.05:
             task._red_gear_assembly_target_pose = task._rotate_pose_about_world_z(target, np.deg2rad(-d["blue_yaw"]))
         task._insert_red_gear_onto_base()
-        if task._get_red_insert_result()["red_insert_vertical_delta"] > self.regrasp_dz and task.plan_success:
-            # still not seated (the gear is tilted/shifted in the hand after being pressed onto the teeth): release,
-            # re-grasp with the scripted approach, and insert again
+        # judge the insertion after the gear has settled (it slides down slowly over ~30 recorded frames)
+        task.delay(self.settle_steps)
+        if self._dz(task) > self.regrasp_dz and task.plan_success:
+            self._wiggle(task)
+        if self._dz(task) > self.regrasp_dz and task.plan_success:
+            # still up: let go -- released, the gear usually slides down onto the teeth phase by itself (r2 seeds
+            # 20032/20035: 3.9 mm while held -> -1.4 mm once released) -- then grasp it again where it is. Only if it is
+            # still up after that, insert again (the scripted insert first lifts the gear by 3 cm).
             task.move(task.atom.open_gripper(0.5), tag="dagger_release_red_gear", delay=False)
+            task.delay(self.settle_steps)
             task.move(task.atom.move_by_displacement(z=self.regrasp_lift, xyz_coord="world"), tag="dagger_retreat",
                       delay=False, time_dilation_factor=0.5)
             task._grasp_red_gear(enable_drive=False)
-            task._insert_red_gear_onto_base()
+            if self._dz(task) > self.regrasp_dz and task.plan_success:
+                task._insert_red_gear_onto_base()
+                task.delay(self.settle_steps)
         task._record_turn_initial_gear_poses()
         task._start_gear_drive()
         task.move(

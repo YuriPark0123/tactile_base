@@ -46,6 +46,9 @@ dagger:
   seat_dz: 0.005          # m, |dz| below this = down on the shaft (for the off-centre check)
   off_xy: 0.0025          # m, off-centre threshold
   seated_dz: 0.002        # m, goal: seated
-  regrasp_dz: 0.0015      # m, re-insert still this high -> release, re-grasp, insert again
+  regrasp_dz: 0.002       # m, settled re-insert still this high (= not seated, seated_dz) -> release (it usually slides down), re-grasp in place; insert again only if still up
+  settle_steps: 30        # sim steps to let the gear settle before that check (and after releasing it)
   regrasp_lift: 0.03      # m, retreat after releasing
   expert_frame_every: 2
+  wiggle_deg: [2, -2, 4, -4, 6, -6]  # still up after the re-insert: turn the held gear to these phases (tooth pitch 12 deg)
+  wiggle_press: 0.0005    # ... and press it down (min(dz, 3 mm) + this) at each one
