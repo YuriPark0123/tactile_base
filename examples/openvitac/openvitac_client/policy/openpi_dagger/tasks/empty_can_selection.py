@@ -9,12 +9,17 @@ Diagnostics (privileged): held = index of the lifted can (0 fanta, 1 pepsi, -1 n
 above its work pose, m), held_dxy (horizontal distance from its work pose, m), empty_in_basket.
 Triggers:
   * carrying_heavy: the heavy can is lifted (> lift_dz) and moved > carry_dxy away from its work pose;
-  * returning_empty: the empty can, after being lifted >= test_dz, is lowered back (< return_dz) near its work pose.
+  * releasing_empty: the empty can, lifted >= test_dz near its work pose, is being let go (the gripper opens by more
+    than open_margin over its grasp width, or the can is lowered back below return_dz). The base policy "returns" the
+    empty can by opening the gripper at the test height, so this must fire while the can is still in the hand; the
+    r1 rule (fire once the can is back on the table) came too late: the can had dropped and the "lift it again"
+    recovery lifted an empty gripper (0/9).
 Event (tactile label, dense): while a can is lifted, 1 = it is the empty can, 0 = the heavy can; unknown (-1) when no
 can is lifted (`event_valid` = 0). Convert with `--event-mode dense --event-name empty`.
 Goal: the empty can is in the basket.
 Recovery (the task's scripted primitives, as in _play_once): carrying_heavy -> return the heavy can to its work pose,
-grasp the empty can, lift, drop it in the basket; returning_empty -> lift it, drop it in the basket.
+grasp the empty can, lift, drop it in the basket; releasing_empty -> close the gripper again (or, if the can already
+slipped out, grasp it again), lift, drop it in the basket.
 """
 from __future__ import annotations
 
@@ -30,15 +35,17 @@ class Expert:
         self.test_dz = float(cfg.get("test_dz", 0.025))
         self.return_dz = float(cfg.get("return_dz", 0.012))
         self.near_dxy = float(cfg.get("near_dxy", 0.02))
-        self._max_dz = {b: 0.0 for b in BRANDS}
+        self.open_margin = float(cfg.get("open_margin", 0.0008))  # m of finger qpos over the grasp width
+        self.reset()
 
     def reset(self):
         self._max_dz = {b: 0.0 for b in BRANDS}
+        self._grasp_q = None  # narrowest finger qpos while the empty can is lifted
 
     def diag(self, task) -> dict:
         if not hasattr(task, "active_cans"):
             return {"held": -1, "held_empty": 0.0, "held_dz": 0.0, "held_dxy": 0.0, "empty_in_basket": 0.0,
-                    "can_dz": np.zeros(2, np.float32)}
+                    "can_dz": np.zeros(2, np.float32), "gripper_q": 0.0}
         dz, dxy = [], []
         for b in BRANDS:
             p = task.active_cans[b].get_pose().p
@@ -55,6 +62,7 @@ class Expert:
             "held_dxy": dxy[held] if held >= 0 else 0.0,
             "empty_in_basket": float(in_basket),
             "can_dz": np.asarray(dz, np.float32),
+            "gripper_q": float(task._robot_manager.get_gripper_qpos()),
         }
 
     def event_rule(self, d) -> bool:  # dense label value (valid only where event_valid)
@@ -75,28 +83,46 @@ class Expert:
             e = BRANDS.index(task.empty_can_brand)
             dz_e = float(d["can_dz"][e])
             if self._max_dz[task.empty_can_brand] >= self.test_dz and dz_e < self.return_dz and dz_e > 0.003:
-                return "returning_empty"
+                return "releasing_empty"
             return None
-        if d["held_empty"] < 0.5 and d["held_dz"] > self.lift_dz and d["held_dxy"] > self.carry_dxy:
-            return "carrying_heavy"
-        if (d["held_empty"] > 0.5 and self._max_dz[BRANDS[h]] >= self.test_dz and d["held_dz"] < self.return_dz
-                and d["held_dxy"] < self.near_dxy):
-            return "returning_empty"
+        if d["held_empty"] < 0.5:
+            if d["held_dz"] > self.lift_dz and d["held_dxy"] > self.carry_dxy:
+                return "carrying_heavy"
+            return None
+        if self._max_dz[BRANDS[h]] < self.test_dz or d["held_dxy"] >= self.near_dxy:
+            return None  # still lifting, or on the way to the basket (where opening is the goal)
+        q = float(d["gripper_q"])
+        self._grasp_q = q if self._grasp_q is None else min(self._grasp_q, q)
+        if q > self._grasp_q + self.open_margin or d["held_dz"] < self.return_dz:
+            return "releasing_empty"
         return None
 
     def recover(self, task, reason: str):
-        from envs.empty_can_selection import EMPTY_CAN_LIFT_HEIGHT
+        from envs.empty_can_selection import EMPTY_CAN_LIFT_HEIGHT, GRIPPER_CLOSE_QPOS_RANGE
 
         empty = task.empty_can_brand
         heavy = [b for b in BRANDS if b != empty][0]
+
+        def dz_empty():
+            return float(task.active_cans[empty].get_pose().p[2] - task.active_work_poses[empty].p[2])
+
         if reason == "carrying_heavy":
             task._return_heavy_can(heavy)
             task._grasp_can(empty)
             task._lift_current_can(empty, EMPTY_CAN_LIFT_HEIGHT)
-        else:  # returning_empty: still in hand, lift it back up
-            dz = float(task.active_cans[empty].get_pose().p[2] - task.active_work_poses[empty].p[2])
-            task._lift_current_can(empty, max(0.0, EMPTY_CAN_LIFT_HEIGHT - dz))
+        else:  # releasing_empty
+            dz0 = dz_empty()
+            if dz0 > 0.003:  # still between the fingers: hold it again
+                task.move(task.atom.close_gripper(float(np.mean(GRIPPER_CLOSE_QPOS_RANGE)) / 0.039),
+                          tag=f"regrip_{empty}_empty_can")
+                task._lift_current_can(empty, 0.02)
+            if dz_empty() < dz0 + 0.01:  # did not come up with the hand: it slipped out, grasp it again
+                task.move(task.atom.open_gripper(1.0), tag=f"open_before_regrasp_{empty}")
+                task.move(task.atom.move_by_displacement(z=0.05), tag=f"clear_{empty}_empty_can")
+                task._grasp_can(empty)
+            task._lift_current_can(empty, max(0.0, EMPTY_CAN_LIFT_HEIGHT - dz_empty()))
         task._drop_empty_can_in_basket(empty)
+        task.delay(20)  # recorded: the released can settles in the basket, so the segment ends at the goal
 
     def after_recover(self, task):
         pass

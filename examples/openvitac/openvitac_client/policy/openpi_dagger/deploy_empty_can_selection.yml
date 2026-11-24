@@ -41,6 +41,7 @@ dagger:
   lift_dz: 0.01           # m above its work pose = the can is lifted
   carry_dxy: 0.03         # m: heavy can moved this far from its work pose = carried to the basket
   test_dz: 0.025          # m: the empty can was lifted at least this high (weight test)
-  return_dz: 0.012        # m: ... and is being lowered back below this
+  return_dz: 0.012        # m: ... and is let go (fingers open > open_margin) or lowered back below this
+  open_margin: 0.0008     # m of finger qpos over the grasp width
   near_dxy: 0.02          # m: ... near its work pose
   expert_frame_every: 2

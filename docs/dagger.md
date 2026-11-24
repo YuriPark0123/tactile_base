@@ -22,7 +22,7 @@
 |---|---|---|---|---|---|
 | insert_USB | 3/20 (100 ep: 24%) | 슬롯 입구에서 어긋난 채 걸림 | `insert_USB` / `jam` | `lerobot/openvitac/insert_USB_dagger_gelsight`, `raw/insert_USB_dagger_r1` | `docs/dagger_insert_USB.md` |
 | gear_assembly | 17/20 | 빨간 기어가 축 위 ~4.6 mm에서 톱니에 얹혀 막힌 채 회전 시작 | `gear_assembly` / `blocked` | `lerobot/openvitac/gear_assembly_dagger_gelsight`, `raw/gear_assembly_dagger_r1` | 아래 |
-| empty_can_selection | 12/20 | 캔 무게 오판 (빈 캔을 무겁다고 내려놓거나 무거운 캔을 바구니로) | `empty_can_selection` / `empty` (dense) | `lerobot/openvitac/empty_can_selection_dagger_gelsight`, `raw/empty_can_selection_dagger_r1` | 아래 |
+| empty_can_selection | 12/20 | 캔 무게 오판 (빈 캔을 무겁다고 내려놓거나 무거운 캔을 바구니로) | `empty_can_selection` / `empty` (dense) | `lerobot/openvitac/empty_can_selection_dagger_gelsight` (r1+r2), `raw/empty_can_selection_dagger_r{1,2}` | 아래 |
 
 ## B200 학습 (공통)
 
@@ -89,24 +89,30 @@ repo 루트에서 실행 (`checkpoints/openvtla_<task>/baseline/19999`는 상대
 - base `yrpark/openvtla-empty_can_selection`: 12/20. 실패 8개 모두 무게 오판: 빈 캔(환타)을 들어 보고 무겁다고 내려놓은
   뒤 무거운 펩시를 바구니에 (3), 무거운 환타를 바구니에 (5, 빈 캔 = 펩시). 두 캔은 외형이 같고 들었을 때의 하중만 다름.
 - 개입 (`tasks/empty_can_selection.py`): 무거운 캔을 든 채 제자리에서 3 cm 이상 옮김 (`carrying_heavy`), 또는 빈 캔을
-  2.5 cm 이상 들어 본 뒤 제자리로 1.2 cm 아래까지 내림 (`returning_empty`).
-- 회복 (스크립트 primitive): `carrying_heavy` → 무거운 캔 제자리 → 빈 캔 잡기 → 들기 → 바구니; `returning_empty` → 다시 들기 → 바구니.
+  2.5 cm 이상 들어 본 뒤 제자리 근처에서 놓기 시작함 — 손가락이 쥔 폭보다 0.8 mm 이상 벌어지거나 1.2 cm 아래까지 내림
+  (`releasing_empty`, r2부터; r1의 `returning_empty`는 캔이 바닥에 떨어진 뒤에야 발동).
+- 회복 (스크립트 primitive): `carrying_heavy` → 무거운 캔 제자리 → 빈 캔 잡기 → 들기 → 바구니; `releasing_empty` → 다시
+  쥐기 (이미 빠졌으면 다시 잡기) → 들기 → 바구니 → 20 step 대기 (캔이 바구니에 자리 잡을 때까지 기록).
 - 라벨 `event_empty` (dense, `--event-mode dense`): 캔을 들고 있는 프레임마다 1 = 빈 캔, 0 = 무거운 캔, 그 외 −1.
-  tactile이 하중 차이를 직접 구분하도록 학습시키는 신호 (BCE 양성 가중치 1). 이 라벨은 시연 데이터에는 없으므로
+  tactile이 하중 차이를 직접 구분하도록 학습시키는 신호 (BCE 양성 가중치 0.15, 클래스 비율 보정). 이 라벨은 시연 데이터에는 없으므로
   시연 프레임은 −1 (`event_default`).
 
-수집 r1 (3090, seed 20000~20049, 50 episode, episode당 ~3분):
+수집 (3090, episode당 ~2~3분):
 
-| | episode |
-|---|---|
-| 개입 없이 base 성공 | 31 |
-| `carrying_heavy` 교정 → 성공 | 10 (10/10) |
-| `returning_empty` 교정 → 실패 | 9 (0/9, 학습 데이터에서 제외) |
+| | r1 (seed 20000~20049) | r2 (seed 20050~20099) |
+|---|---|---|
+| 개입 없이 base 성공 | 31 | 27 |
+| `carrying_heavy` 교정 → 성공 | 10/10 | 7/7 |
+| 빈 캔 놓기 교정 → 성공 | 0/9 (`returning_empty`, 늦게 발동) | 13/13 (`releasing_empty`) |
+| 개입 없이 실패 | 0 | 3 (빈 캔을 바구니 위로 옮겼지만 step 제한까지 놓지 않음 — 무게 판단과 무관) |
 
-학습 데이터: 10,066 프레임 = 교정 구간 10개 + base 성공 31개. 라벨 1 (빈 캔): 4,965, 0 (무거운 캔): 845, −1: 4,256.
-3090 확인: 데이터 로딩 (시연 22,864 + DAgger 10,066; 시연 라벨 −1, DAgger 라벨 0/1/−1 정상).
+r1의 `returning_empty` 실패 원인: base 정책은 빈 캔을 ~5 cm 들어 본 뒤 그 높이에서 그리퍼를 열어 캔을 떨어뜨림. 규칙이
+캔이 바닥에 닿은 뒤에 발동해서 전문가의 "다시 들기"가 빈 그리퍼를 들어 올림. r2는 손가락이 벌어지기 시작하는 순간에
+개입해서 캔이 아직 손에 있음.
 
-한계와 다음 라운드:
-- `returning_empty` 교정이 전부 실패 (원인 미확인). 빈 캔을 내려놓는 실패 유형(base 실패의 3/8)에 대한 교정 데이터가
-  없음. 수정 후 재수집 필요.
-- 교정 구간이 10개로 적음 (base 단독 성공률이 높아 개입이 드묾).
+학습 데이터 (r1+r2, `--event-mode dense --event-name empty --goal-from-episode-success`): 20,984 프레임 = 교정 구간 30개
+(6,760 프레임) + base 성공 58개 (14,224 프레임). 라벨 1 (빈 캔): 11,270, 0 (무거운 캔): 1,638, −1: 8,076.
+`--goal-from-episode-success`: 놓은 캔이 마지막 전문가 프레임에서 아직 떨어지는 중이라 `goal`이 0인 경우가 있어서, episode가
+성공했으면 마지막 전문가 구간을 회복 성공으로 인정 (r2 이후 플러그인은 놓은 뒤 20 step 기록하므로 불필요).
+
+한계: 라벨 0 (무거운 캔을 든 프레임)이 1,638로 적음 — 무거운 캔은 들자마자 내려놓기 때문. `DAGGER_TASKS`의 BCE 양성 가중치를 0.15로 맞춤 (1,638 / 11,270).

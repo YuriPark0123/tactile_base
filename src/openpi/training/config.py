@@ -1192,7 +1192,8 @@ _CONFIGS.extend(
 DAGGER_TASKS = {
     "insert_USB": ("jam", 5.0, 0.0),
     "gear_assembly": ("blocked", 5.0, 0.0),
-    "empty_can_selection": ("empty", 1.0, -1.0),
+    # r1+r2 labels: 11,270 empty (1) vs 1,638 heavy (0) frames -> positive weight ~0.15 balances the two classes
+    "empty_can_selection": ("empty", 0.15, -1.0),
 }
 
 

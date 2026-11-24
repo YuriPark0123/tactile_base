@@ -70,6 +70,9 @@ class Args:
     jam_zone_xy: float = 0.008  # m: only frames near the target slot axis can be jams (not the start slot)
     jam_min_z: float = 0.003  # m: below this the plug is (nearly) inserted
     expert_success_only: bool = True  # keep only expert segments that end with the plug inserted
+    # also accept the last expert segment of a successful episode (the goal may only hold after the segment ends, e.g.
+    # empty_can_selection: the released can is still falling into the basket at the last expert frame)
+    goal_from_episode_success: bool = False
     inserted_xy: float = 0.002  # m, "inserted" = rel z < jam_min_z and xy error < inserted_xy (task success uses 2 mm)
     fps: int = 60
     anytouch2_checkpoint: str = "checkpoint-4frames.pth"
@@ -106,6 +109,7 @@ def segments(
         if success and args.policy_success:
             segs.append((0, len(source), "policy_success"))
         return segs, dropped
+    last_expert = int(np.flatnonzero(source == 1)[-1]) if np.any(source == 1) else -1
     i = 0
     while i < len(source):
         if source[i] == 1:
@@ -113,7 +117,8 @@ def segments(
             while j < len(source) and source[j] == 1:
                 j += 1
             if j - i >= args.min_segment:
-                if goal[j - 1] or not args.expert_success_only:
+                ok = goal[j - 1] or (args.goal_from_episode_success and success and j - 1 == last_expert)
+                if ok or not args.expert_success_only:
                     segs.append((i, j, "expert"))
                 else:
                     dropped += 1
