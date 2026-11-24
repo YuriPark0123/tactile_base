@@ -53,7 +53,7 @@ repo 루트에서 실행 (`checkpoints/openvtla_<task>/baseline/19999`는 상대
   gear_assembly r1은 이 수정 전에 수집되어 재파지 회복이 대부분 실패함 (실패 회복은 학습 데이터에서 제외됨).
 - 같은 seed, 같은 코드라도 실행(launch)마다 UIPC solver가 빠른 상태와 느린 상태로 갈림 (느리면 step당 수 초, gear reset이
   600초 제한 초과). 실행 단위 현상이라 프로세스를 새로 띄우면 대개 정상 속도: gear 수집은 reset 시간 초과 예외가 나면
-  다음 seed부터 다시 띄움, grasp_chip은 `scripts/run_force_seeds.py` (초반 step 속도로 판정해 같은 seed 재실행).
+  다음 seed부터 다시 띄움, grasp_chip은 `scripts/run_force_seeds.py` (120초 뒤에도 최근 10 step이 step당 2초보다 느리면 같은 seed 재실행; 정상 실행도 처음 ~15 step은 느릴 수 있음).
 - 강제 종료한 Isaac Sim이 GPU를 놓기 전에 다음 실행을 시작하면 매우 느려짐 (step당 ~30초): `nvidia-smi` 확인 후 시작.
 
 ## gear_assembly

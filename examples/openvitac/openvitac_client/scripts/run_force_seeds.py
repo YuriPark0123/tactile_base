@@ -2,10 +2,11 @@
 
 The UIPC solve of grasp_chip is not deterministic across launches: with the same seed and code, some launches settle into
 a state where every step needs the full Newton budget (~4-5 s/step, an episode takes ~40 min and exceeds the worker wall
-time), while others run at ~0.1 s/step in pre-move and ~2 steps/s with the policy (~5 min per episode). The split is
-visible within the first ~25 steps (fast: step 25 at ~36 s, slow: at ~110 s). This runner launches each seed as the
-standard force-task worker (same environment as `dispatch_force_task_seeds`), kills a launch whose step `--probe_step`
-is reached later than `--probe_seconds`, and relaunches the same seed (fresh scene, same seed) up to `--max_tries`.
+time), while others run at ~0.1 s/step in pre-move and ~2 steps/s with the policy (~5 min per episode). A launch may also
+spend its first ~15 steps at the slow speed and then run normally, so the decision is made on the recent step rate:
+this runner launches each seed as the standard force-task worker (same environment as `dispatch_force_task_seeds`),
+kills a launch whose last `--window` steps still average more than `--max_step_s` once `--probe_seconds` of episode
+time have passed, and relaunches the same seed (fresh scene, same seed) up to `--max_tries` times.
 
 Output: <out>/attempts/<seed>/{try<k>.log, result.json}, <out>/summary.json; the worker writes videos / trajectories /
 dagger records into <out> as usual.
@@ -54,30 +55,38 @@ def wait_sim_exit(timeout: float = 180):
         time.sleep(5)
 
 
-def run_once(cmd, env, log: Path, probe_step: int, probe_seconds: float, wall: float) -> tuple[str, float | None]:
+def run_once(cmd, env, log: Path, probe_seconds: float, window: int, max_step_s: float, wall: float
+             ) -> tuple[str, float | None]:
+    """Kill the launch if, once `probe_seconds` of episode time have passed, its last `window` steps still took more
+    than `max_step_s` each on average (a slow launch stays at ~4-5 s/step; a normal one may also start at that speed
+    for its first ~15 steps and then runs at 0.1-0.5 s/step)."""
     with log.open("w") as stream:
         p = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
-    t0, probed, speed = time.time(), False, None
+    t0, probed, rate = time.time(), False, None
     try:
         while p.poll() is None:
             time.sleep(5)
             if time.time() - t0 > wall:
                 kill_group(p)
-                return "wall_timeout", speed
-            if not probed:
-                text = log.read_bytes()[-20000:].decode("utf-8", "ignore").replace("\r", "\n")
-                steps = [(int(a), float(b)) for a, b in STEP.findall(text)]
-                if steps:
-                    n, running = steps[-1]
-                    if n >= probe_step:
-                        probed, speed = True, running
-                        if running > probe_seconds:
-                            kill_group(p)
-                            return "slow", speed
-                    elif running > probe_seconds:  # not even at the probe step yet
-                        kill_group(p)
-                        return "slow", running
-        return ("ok" if p.returncode == 0 else f"exit_{p.returncode}"), speed
+                return "wall_timeout", rate
+            if probed:
+                continue
+            text = log.read_bytes()[-40000:].decode("utf-8", "ignore").replace("\r", "\n")
+            steps = [(int(a), float(b)) for a, b in STEP.findall(text)]
+            if not steps or steps[-1][1] < probe_seconds:
+                continue
+            n1, t1 = steps[-1]
+            earlier = [(n, t) for n, t in steps if n <= n1 - window]
+            if earlier:
+                n0, t_0 = earlier[-1]
+                rate = (t1 - t_0) / max(1, n1 - n0)
+            else:  # fewer than `window` steps in the whole probe time
+                rate = t1 / max(1, n1)
+            if rate > max_step_s:
+                kill_group(p)
+                return "slow", rate
+            probed = True
+        return ("ok" if p.returncode == 0 else f"exit_{p.returncode}"), rate
     finally:
         if p.poll() is None:
             kill_group(p)
@@ -88,8 +97,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--seeds", required=True, help="a-b inclusive")
     ap.add_argument("--max_tries", type=int, default=8)
-    ap.add_argument("--probe_step", type=int, default=25)
-    ap.add_argument("--probe_seconds", type=float, default=60.0)
+    ap.add_argument("--probe_seconds", type=float, default=120.0)
+    ap.add_argument("--window", type=int, default=10)
+    ap.add_argument("--max_step_s", type=float, default=2.0)
     ap.add_argument("--wall", type=float, default=1800.0)
     ap.add_argument("eval_args", nargs=argparse.REMAINDER)
     a = ap.parse_args()
@@ -105,8 +115,8 @@ def main():
         att = out / "attempts" / str(seed)
         att.mkdir(parents=True, exist_ok=True)
         result_path = att / "result.json"
-        tries = []
-        for k in range(a.max_tries):
+        tries = list(summary["seeds"].get(str(seed), {}).get("tries", []))
+        for k in range(len(tries), len(tries) + a.max_tries):
             result_path.unlink(missing_ok=True)
             env = os.environ.copy()
             env.update(OPENVITAC_FORCE_WORKER="1", OPENVITAC_FORCE_OUTPUT=str(out), OPENVITAC_FORCE_RESULT=str(result_path),
@@ -117,8 +127,8 @@ def main():
             cmd = [sys.executable, "-u", "-B", str(REPO / "scripts/eval_policy.py"), *eval_args,
                    "--start_seed", str(seed), "--max_seed", str(seed), "--total_num", "1"]
             t0 = time.time()
-            status, speed = run_once(cmd, env, att / f"try{k}.log", a.probe_step, a.probe_seconds, a.wall)
-            row = {"try": k, "status": status, "probe_running_s": speed, "wall_s": round(time.time() - t0, 1)}
+            status, speed = run_once(cmd, env, att / f"try{k}.log", a.probe_seconds, a.window, a.max_step_s, a.wall)
+            row = {"try": k, "status": status, "probe_s_per_step": speed, "wall_s": round(time.time() - t0, 1)}
             if status == "ok" and result_path.exists():
                 row.update(json.loads(result_path.read_text()))
             tries.append(row)
