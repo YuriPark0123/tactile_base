@@ -1194,6 +1194,8 @@ DAGGER_TASKS = {
     "gear_assembly": ("blocked", 5.0, 0.0),
     # r1+r2 labels: 11,270 empty (1) vs 1,638 heavy (0) frames -> positive weight ~0.15 balances the two classes
     "empty_can_selection": ("empty", 0.15, -1.0),
+    # held chip coming down onto the plate too fast to stop before contact (onset label)
+    "grasp_chip": ("impact", 5.0, 0.0),
 }
 
 

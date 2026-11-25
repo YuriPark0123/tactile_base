@@ -77,7 +77,7 @@ class Policy(OpenPiPolicy):
         for k, v in diag.items():
             self._diag_rec.setdefault(k, []).append(np.asarray(v, np.float32))
         self._meta.update(seed=int(task.cfg.seed), save_root=str(task.save_root),
-                          instruction=str(getattr(task, "instruction", "")))
+                          instruction=self._get_prompt(task))  # the prompt the policy was given
         return obs
 
     def _flush(self):

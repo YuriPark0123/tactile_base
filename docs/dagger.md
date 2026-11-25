@@ -22,6 +22,7 @@
 |---|---|---|---|---|---|
 | insert_USB | 3/20 (100 ep: 24%) | 슬롯 입구에서 어긋난 채 걸림 | `insert_USB` / `jam` | `lerobot/openvitac/insert_USB_dagger_gelsight`, `raw/insert_USB_dagger_r1` | `docs/dagger_insert_USB.md` |
 | gear_assembly | 17/20 | 빨간 기어가 축 위 ~4.6 mm에서 톱니에 얹혀 막힌 채 회전 시작 | `gear_assembly` / `blocked` | `lerobot/openvitac/gear_assembly_dagger_gelsight` (r1+r2), `raw/gear_assembly_dagger_r{1,2}` | 아래 |
+| grasp_chip | 19/20 | 접시에 닿는 순간 충돌 (`impact`); DAgger 수집 중 추가로: 운반 중 그리퍼가 벌어져 칩이 빠짐 | `grasp_chip` / `impact` | `lerobot/openvitac/grasp_chip_dagger_gelsight`, `raw/grasp_chip_dagger_r1` | 아래 |
 | empty_can_selection | 12/20 | 캔 무게 오판 (빈 캔을 무겁다고 내려놓거나 무거운 캔을 바구니로) | `empty_can_selection` / `empty` (dense) | `lerobot/openvitac/empty_can_selection_dagger_gelsight` (r1+r2), `raw/empty_can_selection_dagger_r{1,2}` | 아래 |
 
 ## B200 학습 (공통)
@@ -124,3 +125,41 @@ r1의 `returning_empty` 실패 원인: base 정책은 빈 캔을 ~5 cm 들어 �
 성공했으면 마지막 전문가 구간을 회복 성공으로 인정 (r2 이후 플러그인은 놓은 뒤 20 step 기록하므로 불필요).
 
 한계: 라벨 0 (무거운 캔을 든 프레임)이 1,638로 적음 — 무거운 캔은 들자마자 내려놓기 때문. `DAGGER_TASKS`의 BCE 양성 가중치를 0.15로 맞춤 (1,638 / 11,270).
+
+## grasp_chip
+
+force task라 seed마다 별도 프로세스로 실행: `scripts/run_force_seeds.py` (OpenViTac `scripts/`에 복사; 느린 solver 상태에
+빠진 실행은 다시 띄움). 평가·수집 모두 이 러너로:
+
+```bash
+python scripts/run_force_seeds.py --out eval_result/openpi/grasp_chip/base20 --seeds 10000-10019 -- \
+    grasp_chip task_config/grasp_chip.yml policy/openpi/abs_joint/deploy_openvtla_grasp_chip.yml --eval_step_timeout_seconds 0 --headless
+python scripts/run_force_seeds.py --out eval_result/openpi_dagger/grasp_chip/r1 --seeds 20002-20031 -- \
+    grasp_chip task_config/grasp_chip.yml policy/openpi_dagger/deploy_grasp_chip.yml --eval_step_timeout_seconds 0 --headless
+```
+
+- base `yrpark/openvtla-grasp_chip`: 19/20 (seed 10017 `impact`: 쥔 칩이 접시에 너무 빨리 닿음).
+- 개입 (`tasks/grasp_chip.py`, policy 단계에서만):
+  - `slipping`: 들어 올린 칩을 접시 밖에서 운반하는 중 손가락이 가장 좁게 쥔 폭보다 0.15 mm 이상 벌어짐 (채점기의 "벌어짐"
+    기준과 같음). 수집 중 발견한 실패 유형 (seed 20006: 0.2 mm 벌어진 뒤 15 프레임 만에 9 cm 높이에서 빠져 바닥 충돌).
+    성공 episode의 운반 중 최대 벌어짐은 0.06 mm.
+  - `fast_descent`: 쥔 칩이 접시 위 2.5 cm 이내에서, 스크립트의 감속(0.9 m/s²)으로 멈춰도 접촉 순간 0.05 m/s 이상 남을 속도로
+    내려감 (충돌 파손 기준 0.09 m/s). 스크립트 자체도 0.16 m/s로 내려와 접시 1.5 mm 위에서 멈추므로 단순 속도 기준은 쓰지 않음.
+  - `release_high`: 접시 위 4 mm 이상에서 손가락이 벌어지기 시작.
+- 회복 (스크립트 primitive): 다시 쥐기 (정책이 쥐었던 가장 좁은 폭으로 닫은 뒤 스크립트의 단계적 tactile 닫기) → (`slipping`)
+  들기·접시 위로 운반 → 접시 위 접근 높이까지 천천히 → 촉각 마커 기준선 → 지지 접촉까지 6 mm/s로 내려놓기 → 접촉 유지 →
+  놓기 → 빼기. 정책이 잡은 칩에는 스크립트의 손 안 자세가 없으므로 개입 시점 상태로 채움.
+- 라벨 `event_impact` (onset): 전문가에게 넘겨진 실패 상태 프레임.
+
+수집 r1 (3090, seed 20002~20031, 30 episode, episode당 ~5분 + 느린 실행 재시도):
+
+| | episode |
+|---|---|
+| 개입 없이 base 성공 | 22 |
+| `slipping` 교정 → 성공 | 4 (실패 1: 다시 쥐기 강화 전, 내려가다 다시 빠짐) |
+| `fast_descent` 교정 → 성공 | 1 |
+| 개입 없이 실패 | 2 (seed 20006: `slipping` 트리거 추가 전 / seed 20025: 칩을 끝내 못 집고 시간 초과 — 교정 대상 아님) |
+
+학습 데이터: 11,501 프레임 = 교정 구간 5개 (2,384 프레임) + base 성공 22개 (9,117 프레임). 라벨 1은 4 프레임뿐
+(개입이 드물고 실패 상태가 1~2 프레임) → grasp_chip은 event head가 사실상 학습되지 않으므로 `openvtla_grasp_chip_dagger`
+(BC)를 기본으로. 데이터 대부분이 정책 자신의 성공 rollout이라 교정 효과보다는 on-policy 성공 데이터 추가에 가까움.
