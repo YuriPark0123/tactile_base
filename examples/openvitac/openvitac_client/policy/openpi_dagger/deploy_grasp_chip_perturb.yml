@@ -1,0 +1,59 @@
+# DAgger collection for grasp_chip: OpenPI policy (tactile_base openvtla_grasp_chip) + scripted tactile placement when the
+# chip approaches the plate carelessly. Run with scripts/run_force_seeds.py (force task, per-seed launches).
+policy_name: openpi_dagger
+seed: 0
+instruction_type: seen
+instuction_file: null
+eval_from_start: true
+eval_step_timeout_seconds: 0
+eval_action_repeat: 1
+
+openpi:
+  host: "127.0.0.1"
+  port: 8000
+  api_key:
+  websocket_ping_interval:
+  websocket_ping_timeout:
+  websocket_open_timeout: 10
+  websocket_close_timeout: 10
+  prompt: "Gently pick up the intact potato chip spilled from the tipped chip container and place it on the flat serving plate without cracking it."
+  prompt_from_task_instruction: false
+  control_mode: "abs_joint"
+  state_dim: 8
+  action_dim: 8
+  image_size: 224
+  send_tactile: true
+  tactile_image_key: rgb_marker
+  tactile_history_frames: 4
+  tactile_history_stride: 2
+  image_color_order: "rgb"
+  debug_dump_first_n_obs: 0
+  debug_dump_dir: "debug/openpi_obs_openvtla_grasp_chip"
+  debug_dump_bgr_interpretation: true
+  open_loop_horizon: 1
+  temporal_ensemble: true
+  chunk_first_n: 20
+  ensemble_K: 0.01
+  action_repeat: 1   # grasp_chip (force task) requires 1
+  save_trajectory: false
+
+dagger:
+  task: grasp_chip        # plugin policy/openpi_dagger/tasks/grasp_chip.py
+  max_interventions: 1    # the recovery places and releases the chip
+  near_gap: 0.025         # m above the plate floor: "approaching the plate"
+  decel: 0.9              # m/s^2: braking of the scripted transport
+  touch_speed: 0.05       # m/s left at contact even when braking like that -> takeover (impact breaks it at 0.09 m/s)
+  release_gap: 0.004      # m: fingers opening higher than this over the plate -> takeover (the chip would drop)
+  open_margin: 0.0003     # m of finger qpos over the narrowest grip
+  plate_xy: 0.08          # m: chip centre this close to the plate centre = over the plate
+  lift_gap: 0.01          # m: chip lifted
+  slip_open: 0.00015      # m: fingers opening this much while carrying away from the plate -> takeover (slipping)
+  squeeze_ratio: 0.7      # chip strain / fracture strain while held -> takeover (over_squeeze)
+  stall_steps: 400        # policy steps without having lifted the chip -> takeover with the scripted grasp (normal: 131-244)
+  expert_frame_every: 1   # eval runs at 60 Hz with one policy action per sim step (demos: 120 Hz, every 2nd step)
+  perturb_prob: 0.8       # r2: loosen the fingers by perturb_open at a random carry step (unrecorded) -> slipping takeover
+  perturb_open: [0.0002, 0.0003]
+  perturb_steps: [5, 30]
+  perturb_tighten_frac: 0.0   # squeezing by perturbation does not work: the gel pads absorb it (3 mm -> 67 % strain) and the
+                              # policy then re-opens to its width, which reads as release_high; over_squeeze is left to the policy
+  perturb_squeeze: [0.75, 0.9]

@@ -48,4 +48,6 @@ dagger:
   plate_xy: 0.08          # m: chip centre this close to the plate centre = over the plate
   lift_gap: 0.01          # m: chip lifted
   slip_open: 0.00015      # m: fingers opening this much while carrying away from the plate -> takeover (slipping)
+  squeeze_ratio: 0.7      # chip strain / fracture strain while held -> takeover (over_squeeze)
+  stall_steps: 400        # policy steps without having lifted the chip -> takeover with the scripted grasp (normal: 131-244)
   expert_frame_every: 1   # eval runs at 60 Hz with one policy action per sim step (demos: 120 Hz, every 2nd step)
