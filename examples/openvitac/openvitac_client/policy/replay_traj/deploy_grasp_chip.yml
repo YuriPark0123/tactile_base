@@ -1,0 +1,14 @@
+# Replay the grasp_chip base evaluation (OpenPI client trajectories) without the policy server.
+# Run with scripts/run_force_seeds.py (force task: one launch per seed).
+policy_name: replay_traj
+seed: 0
+instuction_file: null
+eval_from_start: true
+eval_step_timeout_seconds: 0
+eval_action_repeat: 1
+openpi:
+  control_mode: abs_joint
+  action_repeat: 1   # as in policy/openpi/abs_joint/deploy_openvtla_grasp_chip.yml
+replay:
+  trajectory_dir: eval_result/openpi/grasp_chip/base20_watchdog/trajectories
+  only_success: false

@@ -138,7 +138,17 @@ python scripts/run_force_seeds.py --out eval_result/openpi_dagger/grasp_chip/r1 
     grasp_chip task_config/grasp_chip.yml policy/openpi_dagger/deploy_grasp_chip.yml --eval_step_timeout_seconds 0 --headless
 ```
 
-- base `yrpark/openvtla-grasp_chip`: 19/20 (seed 10017 `impact`: 쥔 칩이 접시에 너무 빨리 닿음).
+- base `yrpark/openvtla-grasp_chip`: 19/20 (seed 10017 `impact`: 쥔 칩이 접시에 너무 빨리 닿음). 성공 episode도 여유가 작음
+  (최대 변형률이 파손 기준의 74%까지, 충돌 속도 0.06/0.09 m/s까지) → 100 episode로 다시 측정 중.
+- replay: 평가의 `trajectories/<seed>_<result>.npz` (실행한 abs qpos 액션)를 정책 서버 없이 다시 실행
+  (`policy/replay_traj/deploy_grasp_chip.yml`, 같은 러너로). 시험 3/3 (10017 impact 실패, 10011·10019 성공): 결과·step 수
+  동일, 관절 상태 차이 0, 칩 최대 변형률·충돌 속도 1e-12 이내로 같음. 각 replay는 `replay_check/<seed>.json`에 원래 결과와
+  상태 차이를 기록하고 영상을 새로 저장:
+
+  ```bash
+  python scripts/run_force_seeds.py --out eval_result/replay_traj/grasp_chip/run1 --seeds 10017-10017 -- \
+      grasp_chip task_config/grasp_chip.yml policy/replay_traj/deploy_grasp_chip.yml --eval_step_timeout_seconds 0 --headless
+  ```
 - 개입 (`tasks/grasp_chip.py`, policy 단계에서만):
   - `slipping`: 들어 올린 칩을 접시 밖에서 운반하는 중 손가락이 가장 좁게 쥔 폭보다 0.15 mm 이상 벌어짐 (채점기의 "벌어짐"
     기준과 같음). 수집 중 발견한 실패 유형 (seed 20006: 0.2 mm 벌어진 뒤 15 프레임 만에 9 cm 높이에서 빠져 바닥 충돌).
