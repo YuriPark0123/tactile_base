@@ -74,6 +74,13 @@ class Args:
     # empty_can_selection: the released can is still falling into the basket at the last expert frame)
     goal_from_episode_success: bool = False
     inserted_xy: float = 0.002  # m, "inserted" = rel z < jam_min_z and xy error < inserted_xy (task success uses 2 mm)
+    # Stationary runs in expert segments (the scripted recovery's settle delays: the arm and gripper targets do not
+    # change) are cut down to their first `still_keep` frames when longer than that. 0 = keep everything.
+    # gear_assembly: insert -> settle 30 steps / wiggle settles made 23% of the frames idle at the inserted pose and the
+    # fine-tuned policy learned to wait there instead of turning the gear.
+    still_keep: int = 0
+    still_joint_eps: float = 2e-4  # rad, max |action[t+1] - action[t]| over the 7 arm joints
+    still_gripper_eps: float = 1e-5  # m, gripper target change
     fps: int = 60
     anytouch2_checkpoint: str = "checkpoint-4frames.pth"
     sensor: str = "gelsight_mini"
@@ -128,6 +135,25 @@ def segments(
     return segs, dropped
 
 
+def still_frames_kept(action: np.ndarray, s0: int, s1: int, args: Args) -> np.ndarray:
+    """Frame indices of [s0, s1) with stationary runs longer than args.still_keep cut to their first still_keep frames.
+    Frame t is still when its action equals the previous frame's (within the eps), i.e. the run starts at the first
+    repeated target."""
+    idx = np.arange(s0, s1)
+    if args.still_keep <= 0 or s1 - s0 < 2:
+        return idx
+    d = np.abs(np.diff(action[s0:s1], axis=0))
+    still = np.concatenate([[False], (d[:, :7].max(1) < args.still_joint_eps) & (d[:, 7] < args.still_gripper_eps)])
+    keep = np.ones(s1 - s0, bool)
+    run = 0
+    for t in range(s1 - s0):
+        run = run + 1 if still[t] else 0
+        if run > args.still_keep:
+            keep[t] = False
+    keep[-1] = True  # the segment's last frame (goal check) always stays
+    return idx[keep]
+
+
 def main(args: Args) -> None:
     from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -141,7 +167,7 @@ def main(args: Args) -> None:
             raise FileExistsError(f"{out} exists; pass --overwrite")
         shutil.rmtree(out)
 
-    plan, n_dropped = [], 0
+    plan, n_dropped, n_still_cut = [], 0, 0
     for p in files:
         with h5py.File(p, "r") as f:
             segs, dropped = segments(
@@ -151,12 +177,18 @@ def main(args: Args) -> None:
                 n_interventions=int(f.attrs["n_interventions"]),
                 args=args,
             )
-            plan.append((p, segs))
-            n_dropped += dropped
-    total = sum(e - s for _, segs in plan for s, e, _ in segs)
+            action = f["action"][()]
+        # (start, end, kind, kept frame indices): settle-delay runs are cut from expert segments only
+        segs = [
+            (s, e, k, still_frames_kept(action, s, e, args) if k == "expert" else np.arange(s, e)) for s, e, k in segs
+        ]
+        n_still_cut += sum(e - s - len(fr) for s, e, _, fr in segs)
+        plan.append((p, segs))
+        n_dropped += dropped
+    total = sum(len(fr) for _, segs in plan for *_, fr in segs)
     print(
         f"{len(files)} rollouts -> {sum(len(s) for _, s in plan)} segments, {total} frames "
-        f"({n_dropped} failed expert recoveries dropped)"
+        f"({n_dropped} failed expert recoveries dropped, {n_still_cut} stationary expert frames cut)"
     )
 
     dataset = LeRobotDataset.create(
@@ -218,32 +250,33 @@ def main(args: Args) -> None:
             ep_jam = np.where(valid, rule.astype(np.float32), -1.0).astype(np.float32)
         else:  # "onset": 1 only for the failure state handed to the expert
             ep_jam = np.where(rule, -1.0, 0.0).astype(np.float32)
-            for s0, _, kind in segs:
+            for s0, _, kind, _ in segs:
                 t = s0
                 while kind == "expert" and t < n and rule[t]:  # the failure state handed to the expert
                     ep_jam[t] = 1.0
                     t += 1
 
-        for s0, s1, kind in segs:
-            for t in range(s0, s1):
+        for s0, s1, kind, fr in segs:
+            for t in fr:
                 dataset.add_frame(
                     {**{k: data[k][t] for k in KEYS}, "state": state[t], "actions": action[t], "task": instruction}
                 )
             dataset.save_episode()
-            m = s1 - s0
-            feats[gidx : gidx + m] = ep_feats[s0:s1]
-            jam[gidx : gidx + m] = ep_jam[s0:s1]
+            m = len(fr)
+            feats[gidx : gidx + m] = ep_feats[fr]  # tactile history stays that of the full recording
+            jam[gidx : gidx + m] = ep_jam[fr]
             info["seed"][gidx : gidx + m] = seed
-            info["frame"][gidx : gidx + m] = np.arange(s0, s1)
-            info["source"][gidx : gidx + m] = source[s0:s1]
+            info["frame"][gidx : gidx + m] = fr
+            info["source"][gidx : gidx + m] = source[fr]
             segment_log.append(
                 {
                     "seed": seed,
                     "kind": kind,
                     "start": s0,
                     "end": s1,
-                    "jam_frames": int((ep_jam[s0:s1] == 1).sum()),
-                    "unknown_frames": int((ep_jam[s0:s1] < 0).sum()),
+                    "kept_frames": int(m),
+                    "jam_frames": int((ep_jam[fr] == 1).sum()),
+                    "unknown_frames": int((ep_jam[fr] < 0).sum()),
                 }
             )
             gidx += m
@@ -272,6 +305,12 @@ def main(args: Args) -> None:
         "jam_frames": int((jam == 1).sum()),
         "unknown_frames": int((jam < 0).sum()),
         "dropped_failed_expert_segments": n_dropped,
+        "still_cut": {
+            "keep": args.still_keep,
+            "joint_eps": args.still_joint_eps,
+            "gripper_eps": args.still_gripper_eps,
+            "frames_cut": int(n_still_cut),
+        },
         "segments": segment_log,
     }
     (out / "tactile" / "anytouch2_meta.json").write_text(json.dumps(meta, indent=1))

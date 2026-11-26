@@ -21,7 +21,7 @@
 | task | base (20 ep) | 실패 원인 | 플러그인 / 이벤트 | 데이터 (HF `yrpark/openvitac-openvtla-data`) | 문서 |
 |---|---|---|---|---|---|
 | insert_USB | 3/20 (100 ep: 24%) | 슬롯 입구에서 어긋난 채 걸림 | `insert_USB` / `jam` | `lerobot/openvitac/insert_USB_dagger_gelsight`, `raw/insert_USB_dagger_r1` | `docs/dagger_insert_USB.md` |
-| gear_assembly | 17/20 | 빨간 기어가 축 위 ~4.6 mm에서 톱니에 얹혀 막힌 채 회전 시작 | `gear_assembly` / `blocked` | `lerobot/openvitac/gear_assembly_dagger_gelsight` (r1+r2), `raw/gear_assembly_dagger_r{1,2}` | 아래 |
+| gear_assembly | 17/20 | 빨간 기어가 축 위 ~4.6 mm에서 톱니에 얹혀 막힌 채 회전 시작 | `gear_assembly` / `blocked` | `lerobot/openvitac/gear_assembly_dagger_gelsight` (r1+r2), 정지 프레임 제거판 `lerobot/openvitac/gear_assembly_dagger_still_gelsight`, `raw/gear_assembly_dagger_r{1,2}` | 아래 |
 | grasp_chip | 19/20 (100 ep 측정 중) | 충돌 (`impact`), 너무 세게 쥠 (`squeeze`), 운반 중 미끄러짐, 집기 실패 시간 초과 | `grasp_chip` / `impact` | `lerobot/openvitac/grasp_chip_dagger_gelsight` (r1+r2), `raw/grasp_chip_dagger_r{1,2}` | 아래 |
 | empty_can_selection | 12/20 | 캔 무게 오판 (빈 캔을 무겁다고 내려놓거나 무거운 캔을 바구니로) | `empty_can_selection` / `empty` (dense) | `lerobot/openvitac/empty_can_selection_dagger_gelsight` (r1+r2), `raw/empty_can_selection_dagger_r{1,2}` | 아래 |
 
@@ -43,6 +43,24 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.45 uv run scripts/train.py openvtla_${TASK}_dag
 ```
 
 repo 루트에서 실행 (`checkpoints/openvtla_<task>/baseline/19999`는 상대 경로). norm stats 계산 불필요.
+
+gear_assembly 정지 프레임 제거 데이터 (아래 gear 절): config `openvtla_gear_assembly_dagger_still`,
+`openvtla_gear_assembly_dagger_event_still` (데이터 `openvitac/gear_assembly_dagger_still_gelsight`, 나머지 설정은
+`_dagger` / `_dagger_event`와 같음):
+
+```bash
+cd tactile_base && git pull
+export HF_LEROBOT_HOME=/path/to/lerobot OPENPI_DATA_HOME=/path/to/openpi_cache
+uv run huggingface-cli download yrpark/openvitac-openvtla-data --repo-type dataset \
+    --include "lerobot/openvitac/gear_assembly_gelsight/*" "lerobot/openvitac/gear_assembly_dagger_still_gelsight/*" \
+    --local-dir /tmp/ovt && rsync -a /tmp/ovt/lerobot/ $HF_LEROBOT_HOME/
+uv run huggingface-cli download yrpark/openvtla-gear_assembly --include "19999/params/*" "19999/assets/*" \
+    "19999/_CHECKPOINT_METADATA" --local-dir checkpoints/openvtla_gear_assembly/baseline
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.45 uv run scripts/train.py openvtla_gear_assembly_dagger_event_still --exp-name=r3 \
+    --grad-accum-steps 1 --num-workers 8 --no-wandb-enabled
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.45 uv run scripts/train.py openvtla_gear_assembly_dagger_still --exp-name=r3 \
+    --grad-accum-steps 1 --num-workers 8 --no-wandb-enabled
+```
 
 ## 3090 시뮬레이터 메모
 
@@ -92,6 +110,26 @@ task 판정 (`check_success`)의 `red_gear_insert_success`는 스크립트 삽�
 
 한계: 개입이 많음 (62개 중 57개) — 정책이 축 위에서 잠깐 멈추는 정상 동작도 "막힘"으로 감지 (base 단독 성공률 85%).
 그래서 학습 데이터 대부분이 전문가 회복 구간이고 base 성공 구간이 적음 (시연 데이터와 50:50으로 섞어 보완).
+
+### r1/r2 학습 결과와 정지 프레임 제거 (r3 데이터)
+
+위 데이터로 학습한 모델 (3090, seed 10000~10019, base 17/20): `dagger` r1 8/20, `dagger_event` r1 5/20,
+`dagger` r2 3/20, `dagger_event` r2 6/20, 즉 base보다 크게 나빠짐. 실패 episode 대부분은 기어를 축에 끼운 상태 (중심 오차
+~2 mm, 높이 오차 ≤ 4 mm)에서 **회전을 시작하지 않고** (빨간 기어 회전 0~5°, base 성공은 30~40°) 끼운 자세에 멈춘 채
+430 step 제한에 걸림. 일부는 거기서 그리퍼를 엶 (재파지 회복 흉내).
+
+원인: 회복 스크립트의 대기 (삽입 후 30 step settle, wiggle 사이 settle)가 전부 전문가 행동으로 기록됨. 학습
+데이터에서 행동 목표가 바뀌지 않는 프레임이 34%, 10 프레임 이상 이어지는 정지 구간이 23% (insert_USB 5%,
+empty_can 3%). 끼운 자세 (j7 > 0.75)의 프레임 중 정지 비율이 시연 데이터 11% 대비 39% → 정책이 "끼운 뒤에는 기다림"을
+학습.
+
+수정 (`convert_dagger.py --still-keep 3 --still-joint-eps 5e-5`): 전문가 구간에서 행동 목표가 이전 프레임과 같은
+(관절 변화 < 5e-5 rad, 그리퍼 < 1e-5 m) 구간이 3 프레임보다 길면 앞 3 프레임만 남기고 자름 (구간 마지막 프레임은
+유지; 정책 성공 episode는 그대로). 2e-4 rad 미만의 움직임은 대부분 동작 끝의 감속 꼬리라서 5e-5로 둠. tactile
+history 특징은 원래 녹화 전체에서 계산한 그대로라 자른 프레임 앞뒤의 촉각 입력은 실제 시점 기준. 같은 원본 (r1+r2)을
+다시 변환해서 새 경로 `lerobot/openvitac/gear_assembly_dagger_still_gelsight`에 올림 (기존
+`gear_assembly_dagger_gelsight`는 그대로): 15,118 → 11,788 프레임 (전문가 정지 프레임 3,330개 제거; 회복 구간 39개 + base 성공 5개 그대로, 라벨 1: 406, −1: 2,250), 끼운 자세의 정지 비율 39% → 17%; HF commit `968f888d35`. 학습 config `openvtla_gear_assembly_dagger_still`,
+`openvtla_gear_assembly_dagger_event_still`.
 
 ## empty_can_selection
 

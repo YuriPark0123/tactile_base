@@ -1212,8 +1212,10 @@ def _openvitac_dagger_config(
     event_pos_weight: float = 5.0,
     event_default: float = 0.0,
     dagger_weight: float = 1.0,
+    dagger_repo: str | None = None,
 ):
     base = _openvitac_config(name, task, tactile_mode="cls_pool2")
+    dagger_repo = dagger_repo or f"openvitac/{task}_dagger_gelsight"
     model = dataclasses.replace(
         base.model, tactile_event_weight=tactile_event_weight, tactile_event_pos_weight=event_pos_weight
     )
@@ -1226,7 +1228,7 @@ def _openvitac_dagger_config(
         data=dataclasses.replace(
             base.data,
             repo_id=demos,  # assets id = the base model's norm stats
-            repo_ids=(demos, f"openvitac/{task}_dagger_gelsight"),
+            repo_ids=(demos, dagger_repo),
             balance_datasets=True,
             dataset_weights=(1.0, dagger_weight),
             event_name=event_name if tactile_event_weight > 0 else None,
@@ -1253,6 +1255,22 @@ for _task, (_event, _pos_weight, _default) in DAGGER_TASKS.items():
             tactile_event_weight=0.1,
             event_pos_weight=_pos_weight,
             event_default=_default,
+        )
+    )
+
+# gear_assembly r3: same r1+r2 rollouts, converted with the recovery's settle-delay (stationary) frames cut
+# (convert_dagger.py --still-keep 3 --still-joint-eps 5e-5) -> openvitac/gear_assembly_dagger_still_gelsight. The r1/r2
+# models trained on the uncut data learned to stop at the inserted pose instead of turning (docs/dagger.md).
+for _suffix, _ev_weight in (("dagger_still", 0.0), ("dagger_event_still", 0.1)):
+    _CONFIGS.append(
+        _openvitac_dagger_config(
+            f"openvtla_gear_assembly_{_suffix}",
+            "gear_assembly",
+            event_name="blocked",
+            tactile_event_weight=_ev_weight,
+            event_pos_weight=5.0,
+            event_default=0.0,
+            dagger_repo="openvitac/gear_assembly_dagger_still_gelsight",
         )
     )
 
