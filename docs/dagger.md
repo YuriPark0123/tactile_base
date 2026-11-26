@@ -22,8 +22,31 @@
 |---|---|---|---|---|---|
 | insert_USB | 3/20 (100 ep: 24%) | 슬롯 입구에서 어긋난 채 걸림 | `insert_USB` / `jam` | `lerobot/openvitac/insert_USB_dagger_gelsight`, `raw/insert_USB_dagger_r1` | `docs/dagger_insert_USB.md` |
 | gear_assembly | 17/20 | 빨간 기어가 축 위 ~4.6 mm에서 톱니에 얹혀 막힌 채 회전 시작 | `gear_assembly` / `blocked` | `lerobot/openvitac/gear_assembly_dagger_gelsight` (r1+r2), 정지 프레임 제거판 `lerobot/openvitac/gear_assembly_dagger_still_gelsight`, `raw/gear_assembly_dagger_r{1,2}` | 아래 |
-| grasp_chip | 19/20 (100 ep 측정 중) | 충돌 (`impact`), 너무 세게 쥠 (`squeeze`), 운반 중 미끄러짐, 집기 실패 시간 초과 | `grasp_chip` / `impact` | `lerobot/openvitac/grasp_chip_dagger_gelsight` (r1+r2), `raw/grasp_chip_dagger_r{1,2}` | 아래 |
+| grasp_chip | 19/20 (100 ep: 92%) | 충돌 (`impact`), 너무 세게 쥠 (`squeeze`), 운반 중 미끄러짐, 집기 실패 시간 초과 | `grasp_chip` / `impact` | `lerobot/openvitac/grasp_chip_dagger_gelsight` (r1+r2), `raw/grasp_chip_dagger_r{1,2}` | 아래 |
 | empty_can_selection | 12/20 | 캔 무게 오판 (빈 캔을 무겁다고 내려놓거나 무거운 캔을 바구니로) | `empty_can_selection` / `empty` (dense) | `lerobot/openvitac/empty_can_selection_dagger_gelsight` (r1+r2), `raw/empty_can_selection_dagger_r{1,2}` | 아래 |
+
+## DAgger 모델 평가 (3090, 20 ep, seed 10000~10019)
+
+HF `yrpark/openvtla-<task>-<dagger|dagger_event>-<r>` 체크포인트 (5k step), base 평가와 같은 task 설정 / seed.
+
+| task | base | dagger r1 | dagger_event r1 | dagger r2 | dagger_event r2 |
+|---|---|---|---|---|---|
+| insert_USB | 3/20 (100 ep: 24%) | **14/20** | 10/20 | – | – |
+| gear_assembly | 17/20 | 8/20 | 5/20 | 3/20 | 6/20 |
+| empty_can_selection | 12/20 | 13/20 | 14/20 | **16/20** | 12/20 |
+| grasp_chip | 19/20 (100 ep: 92%) | – | – | 19/20 | 19/20 |
+
+- insert_USB: 크게 향상 (15% → 70%).
+- gear_assembly: 크게 하락. 기어를 끼운 뒤 회전하지 않고 멈춤 → 회복 스크립트의 settle 대기 프레임이 원인, 정지
+  프레임 제거 데이터로 r3 학습 (아래 gear 절).
+- empty_can_selection: r2 dagger가 가장 좋음 (60% → 80%).
+- grasp_chip: base도 20 ep 중 19개 성공이라 20 ep로는 차이를 볼 수 없음 (두 모델 모두 실패 1개 = squeeze, 성공
+  episode의 최대 strain도 파손 기준의 95~97%로 base와 비슷). 비교하려면 100 ep 필요 (base 92%).
+- event 버전 vs 일반: −4, −3, +3, +1, −4, 0 (성공 수 차이). 20 ep의 표본 오차 (±2개 정도) 안팎이라 우열을 말하기
+  어렵지만 event가 도움이 된다는 근거는 없음.
+
+결과: OpenViTac `eval_result/openpi/<task>/deploy_openvtla_<task>_<variant>_<r>/`, grasp_chip은
+`eval_result/openpi/grasp_chip/grasp_chip_<variant>_r2/`.
 
 ## B200 학습 (공통)
 
