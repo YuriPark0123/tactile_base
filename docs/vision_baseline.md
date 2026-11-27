@@ -57,9 +57,17 @@ different settings (open-loop 20 steps, a different prompt), so do not use them 
 | task | OpenVTLA base | pi0.5 vision |
 |---|---|---|
 | insert_USB | 24/100 | |
-| gear_assembly | 17/20 (100-ep run stopped at 7/7) | |
-| empty_can_selection | 12/20 | |
+| gear_assembly | 84/100 | |
+| empty_can_selection | 56/100 | |
 | grasp_chip | 92/100 | |
 
-For a fair comparison, gear_assembly and empty_can_selection also need 100-episode OpenVTLA runs. The local
-checkpoints were deleted (2026-11-27), so download `yrpark/openvtla-<task>` again before running them.
+All OpenVTLA numbers above are 100-episode runs on seeds 10000-10099 (gear and can were run on 2026-11-27).
+
+OpenVTLA failure modes (what the vision-only model needs to beat):
+- gear_assembly (16 failures): the red gear was inserted in every failure, but the blue gear turned only 16-29 deg
+  (30 deg is required). The gear centers drifted about 4 mm, compared with under 1 mm in successes, so the mesh
+  slipped while the gear was turning.
+- empty_can_selection (44 failures): 39 picked the wrong can. In 25 the robot put back the light (empty) first can and
+  carried the second; in 14 it carried the heavy first can. In 5 it picked the right can but did not drop it into the
+  basket. Overall the right can was chosen 61/100 times, and 56 of those 61 succeeded. Telling the weights apart by
+  touch is the bottleneck, so this task is the most direct test of the tactile input.
