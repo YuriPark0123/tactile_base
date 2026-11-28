@@ -5,10 +5,13 @@
 
 | task | baseline (OpenVTLA) | DAgger | DAgger + event head | vision-only |
 |---|---|---|---|---|
-| insert_USB | 24/100 (20 seed: 3/20) | 14/20 (20회) | 10/20 (20회) | 학습 전 |
-| gear_assembly | 84/100 (20 seed: 17/20) | 13/20 (20회) | 16/20 (20회) | 학습 전 |
-| empty_can_selection | 56/100 (20 seed: 12/20) | 16/20 (20회) | 12/20 (20회) | 학습 전 |
-| grasp_chip | 92/100 (20 seed: 19/20) | 19/20 (20회) | 19/20 (20회) | 84/99 |
+| insert_USB | 24% (24/100; 20 seed: 3/20) | **70% (14/20, 20회)** | 50% (10/20, 20회) | 학습 전 |
+| gear_assembly | **84% (84/100; 20 seed: 17/20)** | 65% (13/20, 20회) | 80% (16/20, 20회) | 학습 전 |
+| empty_can_selection | 56% (56/100; 20 seed: 12/20) | **80% (16/20, 20회)** | 60% (12/20, 20회) | 학습 전 |
+| grasp_chip | 92% (92/100; 20 seed: 19/20) | **95% (19/20, 20회)** | **95% (19/20, 20회)** | 85% (84/99) |
+
+굵은 글씨는 task별 최고 성공률입니다. 20회 결과는 ±10%p 정도 오차가 있어, 차이가 작은 칸 (gear baseline vs event,
+grasp_chip 전체)은 100회 평가 후 다시 판단합니다.
 
 - 모델 정의:
   - baseline: pi0.5 + AnyTouch2 촉각 토큰, demo 100개로 20k step 학습. HF `yrpark/openvtla-<task>`.
