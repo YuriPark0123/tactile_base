@@ -39,6 +39,9 @@ HF `yrpark/openvtla-<task>-<dagger|dagger_event>-<r>` 체크포인트 (5k step),
 - insert_USB: 크게 향상 (15% → 70%).
 - gear_assembly: 크게 하락. 기어를 끼운 뒤 회전하지 않고 멈춤 → 회복 스크립트의 settle 대기 프레임이 원인, 정지
   프레임 제거 데이터로 r3 학습 (아래 gear 절).
+- gear_assembly r3 (정지 프레임 제거 데이터, 20 ep): `dagger_still` 13/20, `dagger_event_still` 16/20 (base 17/20).
+  r1/r2의 하락은 대부분 회복됐지만 base를 넘지는 못함. 실패 episode는 모두 기어 삽입은 성공했고 파란 기어가 0-8도만
+  회전 (회전 단계를 시작하지 않음; 27도에서 멈춘 1건 제외). base 실패는 16-29도 회전 중 미끄러짐이라 양상이 다름.
 - empty_can_selection: r2 dagger가 가장 좋음 (60% → 80%).
 - grasp_chip: base도 20 ep 중 19개 성공이라 20 ep로는 차이를 볼 수 없음 (두 모델 모두 실패 1개 = squeeze, 성공
   episode의 최대 strain도 파손 기준의 95~97%로 base와 비슷). 비교하려면 100 ep 필요 (base 92%).

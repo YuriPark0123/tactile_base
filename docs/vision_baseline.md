@@ -59,7 +59,7 @@ different settings (open-loop 20 steps, a different prompt), so do not use them 
 | insert_USB | 24/100 | |
 | gear_assembly | 84/100 | |
 | empty_can_selection | 56/100 | |
-| grasp_chip | 92/100 | |
+| grasp_chip | 92/100 | 84/99 |
 
 All OpenVTLA numbers above are 100-episode runs on seeds 10000-10099 (gear and can were run on 2026-11-27).
 
@@ -71,3 +71,9 @@ OpenVTLA failure modes (what the vision-only model needs to beat):
   carried the second; in 14 it carried the heavy first can. In 5 it picked the right can but did not drop it into the
   basket. Overall the right can was chosen 61/100 times, and 56 of those 61 succeeded. Telling the weights apart by
   touch is the bottleneck, so this task is the most direct test of the tactile input.
+
+pi0.5 vision grasp_chip (2026-11-28, `eval_result/openpi/grasp_chip/pi05_vision_grasp_chip_100`): 84/99. Seed 10030
+was excluded because the simulator stayed in the slow solver state on all 8 tries, so the policy never ran on it.
+Failures: policy_timeout 6, impact 5, squeeze 4 (OpenVTLA: impact 4, squeeze 2, policy_timeout 2). On the same seeds,
+8 fail only with vision, 1 fails only with OpenVTLA, and 7 fail with both. An exact McNemar test gives p = 0.04, so on
+this task the tactile input helps (92% vs 85%).
